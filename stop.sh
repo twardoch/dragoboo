@@ -22,7 +22,7 @@ print_warning() {
     echo -e "${YELLOW}[!]${NC} $1"
 }
 
-EXECUTABLE_NAME="Dragoboo"
+EXECUTABLE_NAME="Dragoboo.app"
 
 # Find Dragoboo process
 APP_PID=$(pgrep -f "$EXECUTABLE_NAME" || true)

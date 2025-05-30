@@ -1,0 +1,25 @@
+[0;32m[✓][0m Building Dragoboo with Swift Package Manager...
+[0;32m[✓][0m Building in Debug mode...
+Building for debugging...
+[0/4] Write sources
+[1/4] Write swift-version--58304C5D6DBC2206.txt
+[3/6] Compiling DragobooCore PointerScaler.swift
+[4/6] Emitting module DragobooCore
+[4/7] Write Objects.LinkFileList
+[5/7] Linking Dragoboo
+[6/7] Applying Dragoboo
+Build complete! (2.70s)
+[0;32m[✓][0m Build completed successfully!
+[0;32m[✓][0m Found executable at: .build/debug/Dragoboo
+[0;32m[✓][0m Creating .app bundle...
+[0;32m[✓][0m Copied Info.plist to bundle
+[0;32m[✓][0m Copied Assets.xcassets to bundle
+[0;32m[✓][0m App bundle created at: build/Dragoboo.app
+[1;33m[!][0m Note: Dragoboo requires accessibility permissions to function.
+[1;33m[!][0m You may be prompted to grant permissions in System Settings.
+[0;32m[✓][0m Launching Dragoboo from: build/Dragoboo.app
+[0;32m[✓][0m Dragoboo is now running!
+[0;32m[✓][0m Look for the cursor icon in your menu bar
+[0;32m[✓][0m Hold the fn key while moving your trackpad/mouse for precision mode
+
+[1;33m[!][0m To stop Dragoboo: Use ./stop.sh or kill the process

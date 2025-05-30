@@ -15,6 +15,7 @@ run:
 clean:
 	@echo "Cleaning build directory..."
 	@rm -rf .build
+	@rm -rf build
 	@echo "Clean complete"
 
 # Stop the running app

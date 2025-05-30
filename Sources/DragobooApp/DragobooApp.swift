@@ -8,7 +8,7 @@ struct DragobooApp: App {
     private let logger = Logger(subsystem: "com.dragoboo.app", category: "main")
     
     var body: some Scene {
-        MenuBarExtra("Dragoboo", systemImage: appState.isPrecisionModeActive ? "cursorarrow.click.2" : "cursorarrow") {
+        MenuBarExtra("Dragoboo", systemImage: "cursorarrow") {
             ContentView()
                 .environmentObject(appState)
         }
@@ -63,6 +63,21 @@ class AppState: ObservableObject {
     func updatePrecisionFactor(_ factor: Double) {
         precisionFactor = factor
         pointerScaler?.updatePrecisionFactor(factor)
+    }
+    
+    /// Re-check AXIsProcessTrusted() and restart/stop PointerScaler accordingly.
+    func refreshPermission() {
+        let trusted = AXIsProcessTrusted()
+        if trusted != isAccessibilityGranted {
+            isAccessibilityGranted = trusted
+            logger.debug("Accessibility permission changed. trusted = \(trusted)")
+            if trusted {
+                setupPointerScaler()
+            } else {
+                pointerScaler?.stop()
+                pointerScaler = nil
+            }
+        }
     }
     
     deinit {

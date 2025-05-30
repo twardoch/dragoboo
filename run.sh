@@ -38,6 +38,8 @@ cd "$SCRIPT_DIR"
 APP_NAME="Dragoboo"
 BUILD_DIR=".build"
 EXECUTABLE_NAME="Dragoboo"
+APP_BUNDLE_DIR="build"
+APP_BUNDLE_NAME="Dragoboo.app"
 
 # Parse command line arguments
 CLEAN_BUILD=false
@@ -79,6 +81,7 @@ done
 if [ "$CLEAN_BUILD" = true ]; then
     print_status "Cleaning build directory..."
     rm -rf "$BUILD_DIR"
+    rm -rf "$APP_BUNDLE_DIR"
 fi
 
 print_status "Building $APP_NAME with Swift Package Manager..."
@@ -110,14 +113,53 @@ fi
 
 print_status "Found executable at: $EXECUTABLE_PATH"
 
+# Create .app bundle
+print_status "Creating .app bundle..."
+APP_BUNDLE_PATH="$APP_BUNDLE_DIR/$APP_BUNDLE_NAME"
+CONTENTS_DIR="$APP_BUNDLE_PATH/Contents"
+MACOS_DIR="$CONTENTS_DIR/MacOS"
+RESOURCES_DIR="$CONTENTS_DIR/Resources"
+
+# Create bundle directory structure
+mkdir -p "$MACOS_DIR"
+mkdir -p "$RESOURCES_DIR"
+
+# Copy executable to bundle
+cp "$EXECUTABLE_PATH" "$MACOS_DIR/$EXECUTABLE_NAME"
+chmod +x "$MACOS_DIR/$EXECUTABLE_NAME"
+
+# Copy Info.plist to bundle
+if [ -f "Info.plist" ]; then
+    cp "Info.plist" "$CONTENTS_DIR/"
+    print_status "Copied Info.plist to bundle"
+else
+    print_error "Info.plist not found! Please ensure Info.plist exists in the project root."
+    exit 1
+fi
+
+# Copy Assets.xcassets if it exists in Sources/DragobooApp/
+if [ -d "Sources/DragobooApp/Assets.xcassets" ]; then
+    cp -r "Sources/DragobooApp/Assets.xcassets" "$RESOURCES_DIR/"
+    print_status "Copied Assets.xcassets to bundle"
+fi
+
+print_status "App bundle created at: $APP_BUNDLE_PATH"
+
+# Update executable path to point to bundle
+EXECUTABLE_PATH="$MACOS_DIR/$EXECUTABLE_NAME"
+APP_LAUNCH_PATH="$APP_BUNDLE_PATH"
+
+repomix -o llms.txt -i .specstory,_private,.cursorrules,CLAUDE.md
+tree >>llms.txt
+
 # Exit here if --no-launch was specified
 if [ "$NO_LAUNCH" = true ]; then
-    print_status "Build complete. Executable location: $EXECUTABLE_PATH"
+    print_status "Build complete. App bundle location: $APP_BUNDLE_PATH"
     exit 0
 fi
 
 # Check if app is already running and kill it
-APP_PID=$(pgrep -f "$EXECUTABLE_NAME" || true)
+APP_PID=$(pgrep -f "$APP_BUNDLE_NAME" || true)
 if [ -n "$APP_PID" ]; then
     print_warning "Dragoboo is already running (PID: $APP_PID). Terminating..."
     kill "$APP_PID" 2>/dev/null || true
@@ -128,15 +170,15 @@ fi
 print_warning "Note: Dragoboo requires accessibility permissions to function."
 print_warning "You may be prompted to grant permissions in System Settings."
 
-# Launch the executable
-print_status "Launching $APP_NAME..."
-"$EXECUTABLE_PATH" &
+# Launch the app bundle
+print_status "Launching $APP_NAME from: $APP_BUNDLE_PATH"
+open "$APP_BUNDLE_PATH"
 
 # Wait a moment for the app to start
 sleep 2
 
 # Check if app is running
-if pgrep -f "$EXECUTABLE_NAME" >/dev/null; then
+if pgrep -f "$APP_BUNDLE_NAME" >/dev/null; then
     print_status "Dragoboo is now running!"
     print_status "Look for the cursor icon in your menu bar"
     print_status "Hold the fn key while moving your trackpad/mouse for precision mode"

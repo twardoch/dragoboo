@@ -27,6 +27,9 @@ struct ContentView: View {
                 }
             }
         }
+        .onAppear { 
+            appState.refreshPermission() 
+        }
         .padding()
         .frame(width: 300)
     }
@@ -88,11 +91,12 @@ struct PrecisionSettingsView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
                 
-                if appState.isPrecisionModeActive {
-                    Label("Precision mode active", systemImage: "checkmark.circle.fill")
-                        .font(.caption)
-                        .foregroundColor(.green)
-                }
+                Label(
+                    appState.isPrecisionModeActive ? "Precision mode active" : " ",
+                    systemImage: appState.isPrecisionModeActive ? "checkmark.circle.fill" : "circle"
+                )
+                .font(.caption)
+                .foregroundColor(appState.isPrecisionModeActive ? .green : .clear)
             }
         }
     }
