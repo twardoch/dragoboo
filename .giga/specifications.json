@@ -1,0 +1,22 @@
+[
+  {
+    "fileName": "main-overview.mdc",
+    "description": "Complete system overview describing the video overlay and synchronization architecture, key components, and their interactions"
+  },
+  {
+    "fileName": "alignment-algorithms.mdc",
+    "description": "Detailed documentation of the three core algorithms: Frame Fingerprinting, Spatial Alignment, and Temporal Alignment Engines, including implementation details and optimizations"
+  },
+  {
+    "fileName": "video-processing-flow.mdc",
+    "description": "Comprehensive documentation of the video processing pipeline, data flow between components, and how the various alignment algorithms work together during composition"
+  },
+  {
+    "fileName": "frame-models.mdc",
+    "description": "Documentation of core data models including FrameFingerprint, FrameAlignment, and related structures used throughout the video processing pipeline"
+  },
+  {
+    "fileName": "engine-implementations.mdc",
+    "description": "Detailed implementation documentation for the Full and Mask temporal alignment engines, including their unique approaches and optimizations"
+  }
+]
