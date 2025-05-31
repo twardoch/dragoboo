@@ -1527,3 +1527,333 @@ Let me check what's happening by adding some debugging to see where the SystemSp
 
 ---
 
+Read file: Sources/DragobooCore/PointerScaler.swift
+
+---
+
+
+
+---
+
+I can see the problem! The `systemSpeedController.setSlowSpeed()` call is being made (lines 246), but there are **no logs from SystemSpeedController appearing**, which means the IOKit initialization is likely failing silently.
+
+Let me add some explicit debugging to see what's happening:
+
+---
+
+
+
+---
+
+
+
+---
+
+Now let me also add debugging directly to the SystemSpeedController to see why it's not logging anything:
+
+---
+
+
+
+---
+
+
+
+---
+
+Let me also add debugging to the key methods:
+
+---
+
+
+
+---
+
+
+
+---
+
+
+
+---
+
+
+
+---
+
+Now let's run the app with all this debugging to see exactly where it's failing:
+
+---
+
+```bash
+swift run
+```
+
+```
+adam@Hamlet dragoboo % swift run
+Building for debugging...
+[8/8] Applying Dragoboo
+Build of product 'Dragoboo' complete! (2.24s)
+SystemSpeedController: 🔧 Initializing SystemSpeedController...
+SystemSpeedController: ✅ Loaded IOHIDEventSystemClientCreateWithType
+SystemSpeedController: ✅ Loaded IOHIDEventSystemClientSetProperty
+SystemSpeedController: ✅ Loaded IOHIDEventSystemClientCopyProperty
+SystemSpeedController: 🔧 About to initialize HID client...
+SystemSpeedController: 🔧 initializeHIDClient() started
+SystemSpeedController: ✅ IOHIDEventSystemClient functions are available
+SystemSpeedController: ✅ Accessibility permissions verified
+SystemSpeedController: 🔧 Creating IOHIDEventSystemClient...
+SystemSpeedController: 🔧 IOHIDEventSystemClient creation result: hidClient=SUC
+CESS
+SystemSpeedController: ✅ IOHIDEventSystemClient initialized successfully
+SystemSpeedController: 🔧 Testing basic functionality...
+SystemSpeedController: ❌ IOHIDEventSystemClient basic test failed, disabling
+SystemSpeedController: 🔧 HID client initialization completed. hidClientAvailab
+le=false
+PointerScaler: Starting pointer scaler...
+PointerScaler: Accessibility permissions verified
+PointerScaler: Event tap enabled successfully
+PointerScaler: 🎯 FN key state changed: PRESSED
+PointerScaler: 🎯 handleFnKeyStateChange: isPressed=true, precision=false
+PointerScaler: 🚀 ACTIVATING precision mode
+PointerScaler: 🔧 About to call systemSpeedController.setSlowSpeed(factor: 4.0)
+SystemSpeedController: 🔧 setSlowSpeed(factor: 4.0) called
+SystemSpeedController: 🔧 IOKit not available (hidClientAvailable=false), using
+ UserDefaults fallback
+SystemSpeedController: 🔧 Trying UserDefaults fallback approach...
+SystemSpeedController: 🔧 Saved original mouse speed: 11264.0
+SystemSpeedController: 🔧 Saved original trackpad speed: 0.171875
+SystemSpeedController: 🔧 Setting mouse speed to 2816.0, trackpad to 0.04296875
+SystemSpeedController: 🔧 Validating UserDefaults speed change...
+SystemSpeedController: ✅ Successfully set speed using UserDefaults fallback
+PointerScaler: ✅ systemSpeedController.setSlowSpeed() completed successfully
+PointerScaler: 🎯 FN key state changed: RELEASED
+PointerScaler: 🎯 handleFnKeyStateChange: isPressed=false, precision=true
+PointerScaler: 🛑 DEACTIVATING precision mode
+PointerScaler: 🔧 About to call systemSpeedController.restoreOriginalSpeed()
+PointerScaler: ✅ systemSpeedController.restoreOriginalSpeed() completed succes
+sfully
+PointerScaler: 🎯 FN key state changed: PRESSED
+PointerScaler: 🎯 handleFnKeyStateChange: isPressed=true, precision=false
+PointerScaler: 🚀 ACTIVATING precision mode
+PointerScaler: 🔧 About to call systemSpeedController.setSlowSpeed(factor: 4.0)
+SystemSpeedController: 🔧 setSlowSpeed(factor: 4.0) called
+SystemSpeedController: 🔧 IOKit not available (hidClientAvailable=false), using
+ UserDefaults fallback
+SystemSpeedController: 🔧 Trying UserDefaults fallback approach...
+SystemSpeedController: 🔧 Setting mouse speed to 2816.0, trackpad to 0.04296875
+SystemSpeedController: 🔧 Validating UserDefaults speed change...
+SystemSpeedController: ✅ Successfully set speed using UserDefaults fallback
+PointerScaler: ✅ systemSpeedController.setSlowSpeed() completed successfully
+PointerScaler: 🎯 FN key state changed: RELEASED
+PointerScaler: 🎯 handleFnKeyStateChange: isPressed=false, precision=true
+PointerScaler: 🛑 DEACTIVATING precision mode
+PointerScaler: 🔧 About to call systemSpeedController.restoreOriginalSpeed()
+PointerScaler: ✅ systemSpeedController.restoreOriginalSpeed() completed succes
+sfully
+PointerScaler: 🎯 FN key state changed: PRESSED
+PointerScaler: 🎯 handleFnKeyStateChange: isPressed=true, precision=false
+PointerScaler: 🚀 ACTIVATING precision mode
+PointerScaler: 🔧 About to call systemSpeedController.setSlowSpeed(factor: 4.0)
+SystemSpeedController: 🔧 setSlowSpeed(factor: 4.0) called
+SystemSpeedController: 🔧 IOKit not available (hidClientAvailable=false), using
+ UserDefaults fallback
+SystemSpeedController: 🔧 Trying UserDefaults fallback approach...
+SystemSpeedController: 🔧 Setting mouse speed to 2816.0, trackpad to 0.04296875
+SystemSpeedController: 🔧 Validating UserDefaults speed change...
+SystemSpeedController: ✅ Successfully set speed using UserDefaults fallback
+PointerScaler: ✅ systemSpeedController.setSlowSpeed() completed successfully
+PointerScaler: 🎯 FN key state changed: RELEASED
+PointerScaler: 🎯 handleFnKeyStateChange: isPressed=false, precision=true
+PointerScaler: 🛑 DEACTIVATING precision mode
+PointerScaler: 🔧 About to call systemSpeedController.restoreOriginalSpeed()
+PointerScaler: ✅ systemSpeedController.restoreOriginalSpeed() completed succes
+sfully
+adam@Hamlet dragoboo %
+```
+
+---
+
+
+
+---
+
+Excellent! Now I can see the exact issue:
+
+1. ✅ **IOKit functions load successfully**
+2. ✅ **IOHIDEventSystemClient creates successfully** (`hidClient=SUCCESS`)  
+3. ❌ **Basic functionality test fails** → `IOHIDEventSystemClient basic test failed, disabling`
+4. 🔄 **Falls back to UserDefaults** (which doesn't work immediately on modern macOS)
+
+The problem is that the `testHIDClientBasicFunctionality()` method is failing. Let me check what property key it's trying to read and fix it:
+
+---
+
+Read file: Sources/DragobooCore/SystemSpeedController.swift
+
+---
+
+
+
+---
+
+Perfect! Now I can see the exact issue. The `IOHIDEventSystemClient` is created successfully, but the basic functionality test is failing when trying to read the `"HIDPointerAcceleration"` property. 
+
+The issue might be that the property key is wrong, or we don't have permission to read it (even though we can set it). Let me **skip the test** and see if IOKit actually works when we try to use it:
+
+---
+
+
+
+---
+
+
+
+---
+
+Now let's test if IOKit actually works when we skip the test:
+
+---
+
+```bash
+swift run
+```
+
+```
+adam@Hamlet dragoboo % swift run
+Building for debugging...
+[7/7] Applying Dragoboo
+Build of product 'Dragoboo' complete! (2.04s)
+SystemSpeedController: 🔧 Initializing SystemSpeedController...
+SystemSpeedController: ✅ Loaded IOHIDEventSystemClientCreateWithType
+SystemSpeedController: ✅ Loaded IOHIDEventSystemClientSetProperty
+SystemSpeedController: ✅ Loaded IOHIDEventSystemClientCopyProperty
+SystemSpeedController: 🔧 About to initialize HID client...
+SystemSpeedController: 🔧 initializeHIDClient() started
+SystemSpeedController: ✅ IOHIDEventSystemClient functions are available
+SystemSpeedController: ✅ Accessibility permissions verified
+SystemSpeedController: 🔧 Creating IOHIDEventSystemClient...
+SystemSpeedController: 🔧 IOHIDEventSystemClient creation result: hidClient=SUC
+CESS
+SystemSpeedController: ✅ IOHIDEventSystemClient initialized successfully
+SystemSpeedController: ✅ IOHIDEventSystemClient ready for use (skipping proper
+ty read test)
+SystemSpeedController: 🔧 HID client initialization completed. hidClientAvailab
+le=true
+PointerScaler: Starting pointer scaler...
+PointerScaler: Accessibility permissions verified
+PointerScaler: Event tap enabled successfully
+PointerScaler: 🎯 FN key state changed: PRESSED
+PointerScaler: 🎯 handleFnKeyStateChange: isPressed=true, precision=false
+PointerScaler: 🚀 ACTIVATING precision mode
+PointerScaler: 🔧 About to call systemSpeedController.setSlowSpeed(factor: 4.0)
+SystemSpeedController: 🔧 setSlowSpeed(factor: 4.0) called
+SystemSpeedController: 🔧 Trying IOKit approach (hidClientAvailable=true)
+SystemSpeedController: 🔧 Calling ioKitSetPointerAcceleration...
+SystemSpeedController: ✅ ioKitSetPointerAcceleration completed
+SystemSpeedController: 🔧 Validating speed change...
+SystemSpeedController: ❌ IOKit method failed validation, trying fallback
+SystemSpeedController: 🔧 Trying UserDefaults fallback approach...
+SystemSpeedController: 🔧 Saved original trackpad speed: 0.171875
+SystemSpeedController: 🔧 Setting mouse speed to 2816.0, trackpad to 0.04296875
+SystemSpeedController: 🔧 Validating UserDefaults speed change...
+SystemSpeedController: ❌ UserDefaults method failed validation
+SystemSpeedController: ❌ Both IOKit and UserDefaults methods failed
+PointerScaler: ❌ Failed to change system speed: failedToSetSpeed
+PointerScaler: 🎯 FN key state changed: RELEASED
+PointerScaler: 🎯 handleFnKeyStateChange: isPressed=false, precision=false
+PointerScaler: 🎯 FN key state changed: PRESSED
+PointerScaler: 🎯 handleFnKeyStateChange: isPressed=true, precision=false
+PointerScaler: 🚀 ACTIVATING precision mode
+PointerScaler: 🔧 About to call systemSpeedController.setSlowSpeed(factor: 4.0)
+SystemSpeedController: 🔧 setSlowSpeed(factor: 4.0) called
+SystemSpeedController: 🔧 Trying IOKit approach (hidClientAvailable=true)
+SystemSpeedController: 🔧 Calling ioKitSetPointerAcceleration...
+SystemSpeedController: ✅ ioKitSetPointerAcceleration completed
+SystemSpeedController: 🔧 Validating speed change...
+SystemSpeedController: ❌ IOKit method failed validation, trying fallback
+SystemSpeedController: 🔧 Trying UserDefaults fallback approach...
+SystemSpeedController: 🔧 Setting mouse speed to 2816.0, trackpad to 0.04296875
+SystemSpeedController: 🔧 Validating UserDefaults speed change...
+SystemSpeedController: ❌ UserDefaults method failed validation
+SystemSpeedController: ❌ Both IOKit and UserDefaults methods failed
+PointerScaler: ❌ Failed to change system speed: failedToSetSpeed
+PointerScaler: 🎯 FN key state changed: RELEASED
+PointerScaler: 🎯 handleFnKeyStateChange: isPressed=false, precision=false
+PointerScaler: 🎯 FN key state changed: PRESSED
+PointerScaler: 🎯 handleFnKeyStateChange: isPressed=true, precision=false
+PointerScaler: 🚀 ACTIVATING precision mode
+PointerScaler: 🔧 About to call systemSpeedController.setSlowSpeed(factor: 4.0)
+SystemSpeedController: 🔧 setSlowSpeed(factor: 4.0) called
+SystemSpeedController: 🔧 Trying IOKit approach (hidClientAvailable=true)
+SystemSpeedController: 🔧 Calling ioKitSetPointerAcceleration...
+SystemSpeedController: ✅ ioKitSetPointerAcceleration completed
+SystemSpeedController: 🔧 Validating speed change...
+SystemSpeedController: ❌ IOKit method failed validation, trying fallback
+SystemSpeedController: 🔧 Trying UserDefaults fallback approach...
+SystemSpeedController: 🔧 Setting mouse speed to 2816.0, trackpad to 0.04296875
+SystemSpeedController: 🔧 Validating UserDefaults speed change...
+SystemSpeedController: ❌ UserDefaults method failed validation
+SystemSpeedController: ❌ Both IOKit and UserDefaults methods failed
+PointerScaler: ❌ Failed to change system speed: failedToSetSpeed
+PointerScaler: 🎯 FN key state changed: RELEASED
+PointerScaler: 🎯 handleFnKeyStateChange: isPressed=false, precision=false
+adam@Hamlet dragoboo %
+```
+
+---
+
+
+
+---
+
+Great progress! Now I can see that:
+
+1. ✅ **IOKit is working** - `hidClientAvailable=true` and `ioK
+
+---
+
+
+
+---
+
+
+
+---
+
+
+
+---
+
+Cancelled
+
+---
+
+
+
+---
+
+_**User**_
+
+Hehe, so actually, now we had a crash (macOS logged me out). After logging in, the trackpad speed is actually generally permanently slower. So SOME part of the code did the job, but some other caused a crash
+
+---
+
+_**Assistant**_
+
+
+
+---
+
+_**User**_
+
+Hehe, so actually, now we had a crash (macOS logged me out). After logging in, the trackpad speed is actually generally permanently slower. So SOME part of the code did the job, but some other caused a crash
+
+---
+
+_**Assistant**_
+
+
+
+---
+

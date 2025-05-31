@@ -1,6 +1,7 @@
 import Foundation
 import CoreGraphics
 import ApplicationServices
+import AppKit
 import os
 import Dispatch
 import Carbon
@@ -13,7 +14,14 @@ public class PointerScaler {
     private var isInPrecisionMode = false
     private let logger = Logger(subsystem: "com.dragoboo.core", category: "PointerScaler")
     private var debugTimer: Timer?
-    private var systemSpeedController: SystemSpeedController
+    
+    // Movement accumulator for precise fractional scaling
+    private var accumulatedX: Double = 0.0
+    private var accumulatedY: Double = 0.0
+    
+    // Cursor position tracking for manual control
+    private var lastCursorPosition: CGPoint = .zero
+    private var isTrackingCursor = false
     
     public var onPrecisionModeChange: ((Bool) -> Void)?
     
@@ -21,7 +29,6 @@ public class PointerScaler {
     
     public init(precisionFactor: Double) {
         self.precisionFactor = precisionFactor
-        self.systemSpeedController = SystemSpeedController()
     }
     
     private func addDiagnostics() {
@@ -60,8 +67,13 @@ public class PointerScaler {
         // Check for secure input mode which can block event modifications
         checkSecureInputMode()
         
-        // Only listen for flags changed events (for fn key detection) and tap management events
+        // Listen for ALL relevant events: flags changed, mouse movement, scrolling, and dragging
         let eventMask: CGEventMask = (1 << CGEventType.flagsChanged.rawValue) |
+                                     (1 << CGEventType.mouseMoved.rawValue) |
+                                     (1 << CGEventType.leftMouseDragged.rawValue) |
+                                     (1 << CGEventType.rightMouseDragged.rawValue) |
+                                     (1 << CGEventType.otherMouseDragged.rawValue) |
+                                     (1 << CGEventType.scrollWheel.rawValue) |
                                      (1 << CGEventType.tapDisabledByTimeout.rawValue) |
                                      (1 << CGEventType.tapDisabledByUserInput.rawValue)
         
@@ -70,9 +82,9 @@ public class PointerScaler {
         // Use the main run loop for event tap to ensure proper event capture
         let mainRunLoop = CFRunLoopGetMain()
         
-        // Create event tap for fn key detection only
+        // Create event tap at annotated session level for reliable event modification
         guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
+            tap: .cgAnnotatedSessionEventTap,
             place: .headInsertEventTap,
             options: .defaultTap,
             eventsOfInterest: eventMask,
@@ -86,13 +98,13 @@ public class PointerScaler {
             },
             userInfo: selfPointer
         ) else {
-            logger.error("Event tap FAILED ❌ – likely permission or SecureInput.")
+            logger.error("Event tap FAILED ❌ – annotated session level access. Check permissions.")
             throw PointerScalerError.failedToCreateEventTap
         }
         
         eventTap = tap
         
-        logger.info("Event tap created for fn key detection")
+        logger.info("Event tap created for fn key detection AND event modification")
         
         // Create run loop source and add to main run loop
         guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap!, 0) else {
@@ -110,8 +122,8 @@ public class PointerScaler {
         // Enable the event tap
         CGEvent.tapEnable(tap: eventTap!, enable: true)
         
-        print("PointerScaler: Event tap enabled successfully")
-        logger.info("Event tap enabled successfully")
+        print("PointerScaler: Event tap enabled successfully with event modification")
+        logger.info("Event tap enabled successfully with event modification")
         
         // Run diagnostics after successful setup
         addDiagnostics()
@@ -124,15 +136,10 @@ public class PointerScaler {
         debugTimer?.invalidate()
         debugTimer = nil
         
-        // Restore original system speeds if in precision mode
+        // Reset precision mode state
         if isInPrecisionMode {
-            do {
-                try systemSpeedController.restoreOriginalSpeed()
-                isInPrecisionMode = false
-                logger.info("Restored original system speeds on stop")
-            } catch {
-                logger.error("Failed to restore original speeds on stop: \(error)")
-            }
+            isInPrecisionMode = false
+            logger.info("Precision mode deactivated on stop")
         }
         
         if let tap = eventTap {
@@ -164,23 +171,138 @@ public class PointerScaler {
     }
     
     private func handleEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        // DEBUG: Log ALL events being received
+        logger.debug("🔍 Event received: \(self.debugEventType(type)), precision mode: \(self.isInPrecisionMode)")
+        
         switch type {
         case .flagsChanged:
             handleFlagsChanged(event: event)
             
+        case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
+            logger.debug("🖱️ Movement event: \(self.debugEventType(type)), precision mode: \(self.isInPrecisionMode)")
+            if self.isInPrecisionMode {
+                logger.debug("📐 Processing movement event for scaling...")
+                return self.modifyMovementEvent(event: event)
+            } else {
+                logger.debug("⚪ Passing movement event through unmodified (precision mode inactive)")
+            }
+            
+        case .scrollWheel:
+            logger.debug("🛞 Scroll event, precision mode: \(self.isInPrecisionMode)")
+            if self.isInPrecisionMode {
+                logger.debug("📐 Processing scroll event for scaling...")
+                return self.modifyScrollEvent(event: event)
+            } else {
+                logger.debug("⚪ Passing scroll event through unmodified (precision mode inactive)")
+            }
+            
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
             logger.warning("Event tap disabled by \(type == .tapDisabledByTimeout ? "timeout" : "user input"), attempting to re-enable")
-            if let tap = eventTap {
+            if let tap = self.eventTap {
                 CGEvent.tapEnable(tap: tap, enable: true)
             }
             
         default:
-            // Ignore all other events - we only care about fn key detection
+            // Log other events for debugging
+            logger.debug("➖ Other event: \(self.debugEventType(type)) (ignored)")
             break
         }
         
-        // Always pass events through unmodified - we don't modify any events
+        // Pass events through unmodified by default
         return Unmanaged.passUnretained(event)
+    }
+    
+    /// Intercepts mouse movement events and manually controls cursor position for precision mode
+    /// Uses accumulation algorithm to handle fractional movements properly
+    private func modifyMovementEvent(event: CGEvent) -> Unmanaged<CGEvent>? {
+        print("PointerScaler: 📐 modifyMovementEvent() called!")
+        logger.info("📐 modifyMovementEvent() called!")
+        
+        // Get the movement delta - try both integer and double fields
+        let deltaXInt = event.getIntegerValueField(.mouseEventDeltaX)
+        let deltaYInt = event.getIntegerValueField(.mouseEventDeltaY)
+        let deltaXDouble = event.getDoubleValueField(.mouseEventDeltaX) 
+        let deltaYDouble = event.getDoubleValueField(.mouseEventDeltaY)
+        
+        // Use whichever has non-zero values
+        let deltaX = deltaXInt != 0 ? Double(deltaXInt) : deltaXDouble
+        let deltaY = deltaYInt != 0 ? Double(deltaYInt) : deltaYDouble
+        
+        // Skip if no movement
+        guard deltaX != 0 || deltaY != 0 else {
+            return Unmanaged.passUnretained(event)
+        }
+        
+        print("PointerScaler: 🔍 Delta fields - Int: (\(deltaXInt), \(deltaYInt)), Double: (\(deltaXDouble), \(deltaYDouble)), Using: (\(deltaX), \(deltaY))")
+        
+        print("PointerScaler: 📊 Original deltas: X=\(deltaX), Y=\(deltaY)")
+        logger.info("📊 Original deltas: X=\(deltaX), Y=\(deltaY)")
+        
+        // Apply precision scaling with accumulation (as per algorithms context)
+        self.accumulatedX += deltaX / self.precisionFactor
+        self.accumulatedY += deltaY / self.precisionFactor
+        
+        // Extract integer parts for the actual movement
+        let scaledX = Int(self.accumulatedX)
+        let scaledY = Int(self.accumulatedY)
+        
+        // Keep the fractional remainders for next time
+        self.accumulatedX -= Double(scaledX)
+        self.accumulatedY -= Double(scaledY)
+        
+        print("PointerScaler: 📊 Accumulated: X=\(self.accumulatedX), Y=\(self.accumulatedY)")
+        print("PointerScaler: 📊 Applied deltas: X=\(scaledX), Y=\(scaledY), factor=\(self.precisionFactor)")
+        logger.info("📊 Applied deltas: X=\(scaledX), Y=\(scaledY), accumulated: X=\(self.accumulatedX), Y=\(self.accumulatedY)")
+        
+        // NEW APPROACH: Manual cursor warping instead of event modification
+        print("PointerScaler: 🔧 APPROACH 4: Manual cursor warping (consuming original event)")
+        
+        // Calculate new cursor position
+        let newPosition = CGPoint(
+            x: self.lastCursorPosition.x + Double(scaledX),
+            y: self.lastCursorPosition.y + Double(scaledY)
+        )
+        
+        // Warp cursor to new position
+        let warpResult = CGWarpMouseCursorPosition(newPosition)
+        if warpResult == .success {
+            self.lastCursorPosition = newPosition
+            print("PointerScaler: ✅ Warped cursor: \(self.lastCursorPosition) -> \(newPosition), delta: (\(scaledX), \(scaledY))")
+            logger.info("✅ Cursor warped: original(\(deltaX), \(deltaY)) -> scaled(\(scaledX), \(scaledY)) with factor \(self.precisionFactor)")
+        } else {
+            print("PointerScaler: ❌ Failed to warp cursor to \(newPosition)")
+            logger.error("Failed to warp cursor to position: \(newPosition.x), \(newPosition.y)")
+            // Fallback: let the original event through
+            return Unmanaged.passUnretained(event)
+        }
+        
+        // Consume the original event (return nil to block it from reaching the system)
+        print("PointerScaler: 🚫 Consuming original movement event")
+        return nil
+    }
+    
+    /// Modifies scroll wheel events to slow them down when precision mode is active
+    private func modifyScrollEvent(event: CGEvent) -> Unmanaged<CGEvent>? {
+        // Get the scroll delta
+        let scrollDeltaY = event.getDoubleValueField(.scrollWheelEventDeltaAxis1)
+        let scrollDeltaX = event.getDoubleValueField(.scrollWheelEventDeltaAxis2)
+        
+        // Apply precision scaling (reduce scrolling by precision factor)
+        let scaledScrollY = scrollDeltaY / self.precisionFactor
+        let scaledScrollX = scrollDeltaX / self.precisionFactor
+        
+        // Create a new event with modified scroll deltas
+        guard let modifiedEvent = event.copy() else {
+            logger.error("Failed to copy scroll event")
+            return Unmanaged.passUnretained(event)
+        }
+        
+        modifiedEvent.setDoubleValueField(.scrollWheelEventDeltaAxis1, value: scaledScrollY)
+        modifiedEvent.setDoubleValueField(.scrollWheelEventDeltaAxis2, value: scaledScrollX)
+        
+        logger.debug("Modified scroll: original(\(scrollDeltaX), \(scrollDeltaY)) -> scaled(\(scaledScrollX), \(scaledScrollY)) with factor \(self.precisionFactor)")
+        
+        return Unmanaged.passRetained(modifiedEvent)
     }
     
     private func debugEventType(_ type: CGEventType) -> String {
@@ -238,36 +360,41 @@ public class PointerScaler {
             return 
         }
         
-        do {
-            if isPressed && !isInPrecisionMode {
-                logger.notice("🚀 ACTIVATING precision mode with factor \(self.precisionFactor)")
-                print("PointerScaler: 🚀 ACTIVATING precision mode")
-                print("PointerScaler: 🔧 About to call systemSpeedController.setSlowSpeed(factor: \(precisionFactor))")
-                try systemSpeedController.setSlowSpeed(factor: precisionFactor)
-                print("PointerScaler: ✅ systemSpeedController.setSlowSpeed() completed successfully")
-                isInPrecisionMode = true
-                logger.info("✅ Precision mode activated - system speed slowed by \(self.precisionFactor)x")
-            } else if !isPressed && isInPrecisionMode {
-                logger.notice("🛑 DEACTIVATING precision mode")
-                print("PointerScaler: 🛑 DEACTIVATING precision mode")
-                print("PointerScaler: 🔧 About to call systemSpeedController.restoreOriginalSpeed()")
-                try systemSpeedController.restoreOriginalSpeed()
-                print("PointerScaler: ✅ systemSpeedController.restoreOriginalSpeed() completed successfully")
-                isInPrecisionMode = false
-                logger.info("✅ Precision mode deactivated - system speed restored")
-            }
+        if isPressed && !isInPrecisionMode {
+            logger.notice("🚀 ACTIVATING precision mode with factor \(self.precisionFactor) - using CURSOR WARPING")
+            print("PointerScaler: 🚀 ACTIVATING precision mode - using CURSOR WARPING approach")
             
-            // Always call the callback to update UI
-            DispatchQueue.main.async {
-                self.onPrecisionModeChange?(isPressed)
-            }
-        } catch {
-            logger.error("❌ Failed to change system speed: \(error)")
-            print("PointerScaler: ❌ Failed to change system speed: \(error)")
-            // Still call the callback to update UI with error state
-            DispatchQueue.main.async {
-                self.onPrecisionModeChange?(isPressed)
-            }
+            // Reset accumulator when activating precision mode
+            self.accumulatedX = 0.0
+            self.accumulatedY = 0.0
+            
+            // Start cursor tracking - get current position from system
+            let currentPosition = NSEvent.mouseLocation
+            // Convert from screen coordinates (bottom-left origin) to CG coordinates (top-left origin)
+            let screenHeight = NSScreen.main?.frame.height ?? 1440
+            self.lastCursorPosition = CGPoint(x: currentPosition.x, y: screenHeight - currentPosition.y)
+            self.isTrackingCursor = true
+            print("PointerScaler: 🔄 Reset accumulator and started cursor tracking at \(self.lastCursorPosition)")
+            
+            isInPrecisionMode = true
+            logger.info("✅ Precision mode activated - cursor will be manually controlled with \(self.precisionFactor)x scaling")
+        } else if !isPressed && isInPrecisionMode {
+            logger.notice("🛑 DEACTIVATING precision mode - stopping cursor control")
+            print("PointerScaler: 🛑 DEACTIVATING precision mode - stopping cursor control")
+            
+            // Reset accumulator and stop tracking
+            self.accumulatedX = 0.0
+            self.accumulatedY = 0.0
+            self.isTrackingCursor = false
+            print("PointerScaler: 🔄 Reset accumulator and stopped cursor tracking")
+            
+            isInPrecisionMode = false
+            logger.info("✅ Precision mode deactivated - cursor control returned to system")
+        }
+        
+        // Always call the callback to update UI
+        DispatchQueue.main.async {
+            self.onPrecisionModeChange?(isPressed)
         }
     }
     
@@ -287,10 +414,9 @@ public class PointerScaler {
             logger.warning("Secure input mode is active")
         }
         
-        // Validate speed change if in precision mode
+        // Report method being used
         if isInPrecisionMode {
-            let isValid = systemSpeedController.validateSpeedChange(expectedFactor: precisionFactor)
-            logger.notice("System speed validation: \(isValid ? "VALID" : "INVALID")")
+            logger.notice("Precision control method: SAFE EVENT MODIFICATION (no system changes)")
         }
     }
 }

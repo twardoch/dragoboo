@@ -53,10 +53,10 @@ private func initializeHIDClient() {
     
     do {
         // Wrap in exception handling to prevent crashes
-        hidClient = createFunc(kCFAllocatorDefault, 0, nil) // kIOHIDEventSystemClientTypeAdmin = 0
-        hidClientAvailable = (hidClient != nil)
-        
-        if hidClientAvailable {
+    hidClient = createFunc(kCFAllocatorDefault, 0, nil) // kIOHIDEventSystemClientTypeAdmin = 0
+    hidClientAvailable = (hidClient != nil)
+    
+    if hidClientAvailable {
             logger.info("✅ IOHIDEventSystemClient initialized successfully")
             
             // Test basic functionality immediately
@@ -65,9 +65,9 @@ private func initializeHIDClient() {
                 hidClient = nil
                 hidClientAvailable = false
             }
-        } else {
-            logger.warning("Failed to create IOHIDEventSystemClient - falling back to UserDefaults")
-        }
+    } else {
+        logger.warning("Failed to create IOHIDEventSystemClient - falling back to UserDefaults")
+    }
     } catch {
         logger.error("IOHIDEventSystemClient initialization crashed: \(error)")
         hidClient = nil
@@ -104,34 +104,34 @@ private func ioKitSetPointerAcceleration(factor: Double) throws {
     }
     
     do {
-        // Save original acceleration if not already saved
-        if originalMouseSpeed == nil {
-            let propertyKey = "HIDPointerAcceleration" as CFString
-            if let result = copyProperty(client, propertyKey),
-               let number = result as? NSNumber {
-                originalMouseSpeed = number.doubleValue
+    // Save original acceleration if not already saved
+    if originalMouseSpeed == nil {
+        let propertyKey = "HIDPointerAcceleration" as CFString
+        if let result = copyProperty(client, propertyKey),
+           let number = result as? NSNumber {
+            originalMouseSpeed = number.doubleValue
                 logger.debug("Saved original pointer acceleration: \(self.originalMouseSpeed!)")
-            } else {
+        } else {
                 // Try fallback values for different macOS versions
                 originalMouseSpeed = try? getCurrentSystemAcceleration() ?? 45056.0
                 logger.debug("Using fallback original acceleration: \(self.originalMouseSpeed!)")
-            }
         }
-        
-        // Calculate new acceleration value
-        let newAcceleration = (originalMouseSpeed ?? 45056.0) / factor
-        var accelerationValue = newAcceleration
-        
+    }
+    
+    // Calculate new acceleration value
+    let newAcceleration = (originalMouseSpeed ?? 45056.0) / factor
+    var accelerationValue = newAcceleration
+    
         // Set the new acceleration with bounds checking
         if newAcceleration < 1.0 || newAcceleration > 100000.0 {
             logger.warning("Calculated acceleration out of bounds: \(newAcceleration), clamping")
             accelerationValue = max(1.0, min(100000.0, newAcceleration))
         }
         
-        let propertyKey = "HIDPointerAcceleration" as CFString
-        let value = CFNumberCreate(kCFAllocatorDefault, .doubleType, &accelerationValue)!
-        
-        setProperty(client, propertyKey, value)
+    let propertyKey = "HIDPointerAcceleration" as CFString
+    let value = CFNumberCreate(kCFAllocatorDefault, .doubleType, &accelerationValue)!
+    
+    setProperty(client, propertyKey, value)
         logger.info("✅ Set pointer acceleration to \(accelerationValue) (factor: \(factor))")
         
     } catch {
@@ -151,11 +151,11 @@ private func getCurrentSystemAcceleration() throws -> Double {
     for (key, defaultValue) in sources {
         let value = CFPreferencesCopyValue(
             key as CFString,
-            kCFPreferencesAnyApplication,
-            kCFPreferencesCurrentUser,
-            kCFPreferencesAnyHost
-        )
-        
+        kCFPreferencesAnyApplication,
+        kCFPreferencesCurrentUser,
+        kCFPreferencesAnyHost
+    )
+    
         if let number = value as? NSNumber {
             return number.doubleValue
         }

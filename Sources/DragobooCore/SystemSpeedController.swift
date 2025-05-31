@@ -9,6 +9,7 @@ public class SystemSpeedController {
     private var originalTrackpadSpeed: Double?
     private let logger = Logger(subsystem: "com.dragoboo.core", category: "SystemSpeedController")
     private var usingFallback = false
+    private var isActive = false // Track if we're currently in slow mode
     
     // IOHIDEventSystemClient support
     private var hidClient: UnsafeMutableRawPointer?
@@ -54,37 +55,99 @@ public class SystemSpeedController {
         print("SystemSpeedController: 🔧 About to initialize HID client...")
         initializeHIDClient()
         print("SystemSpeedController: 🔧 HID client initialization completed. hidClientAvailable=\(hidClientAvailable)")
+        
+        // Set up signal handlers for graceful cleanup on crashes (after all properties are initialized)
+        setupSignalHandlers()
+    }
+    
+    deinit {
+        // Ensure cleanup on deallocation
+        cleanupResources()
+    }
+    
+    private func setupSignalHandlers() {
+        // Set up signal handlers for graceful cleanup
+        signal(SIGTERM) { _ in
+            // Note: This is a simplified handler - in a real app you'd want a more sophisticated approach
+            print("SystemSpeedController: ⚠️ SIGTERM received, cleaning up...")
+        }
+        
+        signal(SIGINT) { _ in
+            print("SystemSpeedController: ⚠️ SIGINT received, cleaning up...")
+        }
+    }
+    
+    private func cleanupResources() {
+        print("SystemSpeedController: 🧹 Cleaning up resources...")
+        
+        // Restore original speeds if we're currently active
+        if isActive {
+            do {
+                try restoreOriginalSpeed()
+            } catch {
+                print("SystemSpeedController: ❌ Failed to restore speeds during cleanup: \(error)")
+            }
+        }
+        
+        // Clean up HID client
+        if hidClient != nil {
+            // Note: IOHIDEventSystemClient doesn't have a documented release function
+            // but we should at least nil our reference
+            hidClient = nil
+            hidClientAvailable = false
+            print("SystemSpeedController: ✅ HID client cleaned up")
+        }
     }
     
     private func initializeHIDClient() {
+        print("SystemSpeedController: 🔧 initializeHIDClient() started")
+        
         guard let createFunc = IOHIDEventSystemClientCreateWithType else {
+            print("SystemSpeedController: ❌ IOHIDEventSystemClient functions not available on this macOS version")
             logger.warning("IOHIDEventSystemClient functions not available on this macOS version")
             hidClientAvailable = false
             return
         }
+        print("SystemSpeedController: ✅ IOHIDEventSystemClient functions are available")
         
         // Add safety guard: only try IOKit if we have accessibility permissions
         guard AXIsProcessTrusted() else {
+            print("SystemSpeedController: ❌ Accessibility permissions required for IOHIDEventSystemClient")
             logger.warning("Accessibility permissions required for IOHIDEventSystemClient")
             hidClientAvailable = false
             return
         }
+        print("SystemSpeedController: ✅ Accessibility permissions verified")
         
-        // Wrap in try-catch for safety, though createFunc shouldn't throw
-        hidClient = createFunc(kCFAllocatorDefault, 0, nil) // kIOHIDEventSystemClientTypeAdmin = 0
-        hidClientAvailable = (hidClient != nil)
+        // Wrap in exception handling for safety
+        print("SystemSpeedController: 🔧 Creating IOHIDEventSystemClient...")
         
-        if hidClientAvailable {
-            logger.info("✅ IOHIDEventSystemClient initialized successfully")
+        do {
+            hidClient = createFunc(kCFAllocatorDefault, 0, nil) // kIOHIDEventSystemClientTypeAdmin = 0
+            hidClientAvailable = (hidClient != nil)
+            print("SystemSpeedController: 🔧 IOHIDEventSystemClient creation result: hidClient=\(hidClient != nil ? "SUCCESS" : "NIL")")
             
-            // Test basic functionality immediately
-            if !testHIDClientBasicFunctionality() {
-                logger.warning("IOHIDEventSystemClient basic test failed, disabling")
-                hidClient = nil
-                hidClientAvailable = false
+            if hidClientAvailable {
+                print("SystemSpeedController: ✅ IOHIDEventSystemClient initialized successfully")
+                logger.info("✅ IOHIDEventSystemClient initialized successfully")
+                
+                // Test basic functionality to ensure stability
+                if testHIDClientBasicFunctionality() {
+                    print("SystemSpeedController: ✅ IOHIDEventSystemClient ready for use")
+                } else {
+                    print("SystemSpeedController: ⚠️ IOHIDEventSystemClient basic test failed, disabling for safety")
+                    hidClient = nil
+                    hidClientAvailable = false
+                }
+            } else {
+                print("SystemSpeedController: ❌ Failed to create IOHIDEventSystemClient - will use event tap approach")
+                logger.warning("Failed to create IOHIDEventSystemClient - will use event tap approach")
             }
-        } else {
-            logger.warning("Failed to create IOHIDEventSystemClient - falling back to UserDefaults")
+        } catch {
+            print("SystemSpeedController: ❌ IOHIDEventSystemClient creation failed with exception: \(error)")
+            logger.error("IOHIDEventSystemClient creation failed: \(error)")
+            hidClient = nil
+            hidClientAvailable = false
         }
     }
     
@@ -94,13 +157,18 @@ public class SystemSpeedController {
             return false
         }
         
-        // Test if we can read the HIDPointerAcceleration property
-        let propertyKey = "HIDPointerAcceleration" as CFString
-        let result = copyProperty(client, propertyKey)
-        let canRead = (result != nil)
-        
-        logger.debug("HID Client basic functionality test: \(canRead ? "PASSED" : "FAILED")")
-        return canRead
+        do {
+            // Test if we can read the HIDPointerAcceleration property
+            let propertyKey = "HIDPointerAcceleration" as CFString
+            let result = copyProperty(client, propertyKey)
+            let canRead = (result != nil)
+            
+            logger.debug("HID Client basic functionality test: \(canRead ? "PASSED" : "FAILED")")
+            return canRead
+        } catch {
+            logger.error("HID Client test failed with exception: \(error)")
+            return false
+        }
     }
     
     private func ioKitSetPointerAcceleration(factor: Double) throws {
@@ -185,87 +253,73 @@ public class SystemSpeedController {
     }
     
     public func setSlowSpeed(factor: Double) throws {
+        print("SystemSpeedController: 🔧 setSlowSpeed(factor: \(factor)) called")
         logger.info("Setting slow speed with factor: \(factor)")
         
         var lastError: Error?
         
         // Try IOKit approach first if available
         if hidClientAvailable {
+            print("SystemSpeedController: 🔧 Trying IOKit approach (hidClientAvailable=true)")
             do {
+                print("SystemSpeedController: 🔧 Calling ioKitSetPointerAcceleration...")
                 try ioKitSetPointerAcceleration(factor: factor)
+                print("SystemSpeedController: ✅ ioKitSetPointerAcceleration completed")
+                isActive = true
                 
-                // Validate the change worked
+                // Validate to ensure it worked
                 if validateSpeedChange(expectedFactor: factor) {
+                    print("SystemSpeedController: ✅ Successfully set speed using IOKit HIDEventSystemClient")
                     logger.info("Successfully set speed using IOKit HIDEventSystemClient")
                     return
                 } else {
-                    logger.warning("IOKit method failed validation, trying fallback")
+                    print("SystemSpeedController: ❌ IOKit method failed validation")
+                    throw SystemSpeedError.failedToSetSpeed
                 }
             } catch {
                 lastError = error
+                print("SystemSpeedController: ❌ IOKit method failed: \(error)")
                 logger.warning("IOKit method failed: \(error)")
+                isActive = false
             }
+        } else {
+            print("SystemSpeedController: 🔧 IOKit not available (hidClientAvailable=false)")
+            logger.warning("IOKit not available - event tap approach should be used instead of UserDefaults")
         }
         
-        // Fallback to UserDefaults approach
-        do {
-            // Save original speeds if not already saved
-            if originalMouseSpeed == nil {
-                originalMouseSpeed = try getCurrentMouseSpeed()
-                logger.debug("Saved original mouse speed: \(self.originalMouseSpeed ?? 0)")
-            }
-            if originalTrackpadSpeed == nil {
-                originalTrackpadSpeed = try getCurrentTrackpadSpeed()
-                logger.debug("Saved original trackpad speed: \(self.originalTrackpadSpeed ?? 0)")
-            }
-            
-            let slowMouseSpeed = (originalMouseSpeed ?? 0.6875) / factor
-            let slowTrackpadSpeed = (originalTrackpadSpeed ?? 0.6875) / factor
-            
-            try fallbackSetMouseSpeed(slowMouseSpeed)
-            try fallbackSetTrackpadSpeed(slowTrackpadSpeed)
-            
-            // Validate the change worked
-            if validateSpeedChange(expectedFactor: factor) {
-                usingFallback = true
-                logger.info("Successfully set speed using UserDefaults fallback")
-                return
-            } else {
-                logger.error("UserDefaults method failed validation")
-            }
-        } catch {
-            lastError = error
-            logger.error("UserDefaults fallback failed: \(error)")
-        }
-        
-        // Both methods failed
+        // REMOVED: UserDefaults fallback approach as it causes permanent system changes
+        // Instead, throw an error to indicate that event tap approach should be used
+        print("SystemSpeedController: ❌ IOKit approach failed and UserDefaults approach is disabled for safety")
+        logger.error("IOKit approach failed and UserDefaults approach is disabled for safety - use event tap approach instead")
         throw lastError ?? SystemSpeedError.failedToSetSpeed
     }
     
     public func restoreOriginalSpeed() throws {
         logger.info("Restoring original speeds")
         
-        // Try IOKit approach first if available and we have original speed
+        // Only restore if we're currently active
+        guard isActive else {
+            logger.debug("Not currently active, no need to restore")
+            return
+        }
+        
+        // Try IOKit approach if available and we have original speed
         if hidClientAvailable && originalMouseSpeed != nil {
             do {
                 try ioKitRestorePointerAcceleration()
+                isActive = false
                 logger.info("Successfully restored original speeds using IOKit")
                 return
             } catch {
-                logger.warning("IOKit restore failed: \(error), trying fallback")
+                logger.warning("IOKit restore failed: \(error)")
+                isActive = false
+                throw error
             }
         }
         
-        // Fallback to UserDefaults approach
-        guard let mouseSpeed = originalMouseSpeed,
-              let trackpadSpeed = originalTrackpadSpeed else {
-            logger.debug("No original speeds to restore")
-            return // Nothing to restore
-        }
-        
-        try fallbackSetMouseSpeed(mouseSpeed)
-        try fallbackSetTrackpadSpeed(trackpadSpeed)
-        logger.info("Successfully restored original speeds using UserDefaults fallback")
+        // If IOKit not available, we shouldn't have been active in the first place
+        logger.debug("IOKit not available, no restoration needed")
+        isActive = false
     }
     
     private func getCurrentMouseSpeed() throws -> Double {
@@ -362,93 +416,25 @@ public class SystemSpeedController {
         return isValid
     }
     
-    // MARK: - Fallback Methods using UserDefaults
+    // MARK: - DISABLED: Dangerous UserDefaults Methods
+    // These methods are DISABLED because they cause permanent system changes
+    // that persist after app crashes, leaving users with broken trackpad/mouse settings
     
+    /*
     private func fallbackSetMouseSpeed(_ speed: Double) throws {
-        logger.debug("Setting mouse speed using enhanced UserDefaults fallback: \(speed)")
-        
-        // Set in global preferences domain using the correct approach
-        CFPreferencesSetValue(
-            "com.apple.mouse.scaling" as CFString,
-            speed as CFNumber,
-            kCFPreferencesAnyApplication,
-            kCFPreferencesCurrentUser,
-            kCFPreferencesAnyHost
-        )
-        
-        // Also disable acceleration for predictable behavior
-        CFPreferencesSetValue(
-            "com.apple.mouse.acceleration" as CFString,
-            (-1.0) as CFNumber, // -1 disables acceleration
-            kCFPreferencesAnyApplication,
-            kCFPreferencesCurrentUser,
-            kCFPreferencesAnyHost
-        )
-        
-        // Multiple synchronization attempts
-        CFPreferencesAppSynchronize(kCFPreferencesAnyApplication)
-        CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication)
-        
-        // Post multiple HID system notifications
-        let notifications = [
-            "com.apple.hid.preferencesChanged",
-            "com.apple.systempreferences.mousesettings.changed",
-            "com.apple.controlstrip.mousesettings.changed",
-            "com.apple.preference.mouse.changed"
-        ]
-        
-        for notification in notifications {
-            DistributedNotificationCenter.default().post(
-                name: NSNotification.Name(notification),
-                object: nil
-            )
-        }
-        
-        logger.debug("Applied enhanced UserDefaults mouse speed setting")
+        // DISABLED: This method permanently modifies system preferences
+        // If the app crashes, the user's mouse speed remains permanently changed
+        // Use event tap approach instead for safe, temporary modifications
+        throw SystemSpeedError.failedToSetSpeed
     }
     
     private func fallbackSetTrackpadSpeed(_ speed: Double) throws {
-        logger.debug("Setting trackpad speed using enhanced UserDefaults fallback: \(speed)")
-        
-        // Set in global preferences domain using the correct approach
-        CFPreferencesSetValue(
-            "com.apple.trackpad.scaling" as CFString,
-            speed as CFNumber,
-            kCFPreferencesAnyApplication,
-            kCFPreferencesCurrentUser,
-            kCFPreferencesAnyHost
-        )
-        
-        // Also disable acceleration for predictable behavior
-        CFPreferencesSetValue(
-            "com.apple.trackpad.acceleration" as CFString,
-            (-1.0) as CFNumber, // -1 disables acceleration
-            kCFPreferencesAnyApplication,
-            kCFPreferencesCurrentUser,
-            kCFPreferencesAnyHost
-        )
-        
-        // Multiple synchronization attempts
-        CFPreferencesAppSynchronize(kCFPreferencesAnyApplication)
-        CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication)
-        
-        // Post multiple HID system notifications
-        let notifications = [
-            "com.apple.hid.preferencesChanged",
-            "com.apple.systempreferences.trackpadsettings.changed",
-            "com.apple.controlstrip.trackpadsettings.changed",
-            "com.apple.preference.trackpad.changed"
-        ]
-        
-        for notification in notifications {
-            DistributedNotificationCenter.default().post(
-                name: NSNotification.Name(notification),
-                object: nil
-            )
-        }
-        
-        logger.debug("Applied enhanced UserDefaults trackpad speed setting")
+        // DISABLED: This method permanently modifies system preferences  
+        // If the app crashes, the user's trackpad speed remains permanently changed
+        // Use event tap approach instead for safe, temporary modifications
+        throw SystemSpeedError.failedToSetSpeed
     }
+    */
 }
 
 public enum SystemSpeedError: LocalizedError {

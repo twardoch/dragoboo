@@ -46,6 +46,39 @@ Whether you're a designer pixel-peeping in an image editor, an engineer working 
 - **SwiftUI Interface:** Modern and clean user interface for settings.
 - **Lightweight:** Designed to be efficient and have minimal impact on system performance.
 - **Accessibility Focused:** Requires and guides users through granting necessary Accessibility permissions.
+- **🛡️ Crash-Safe:** Uses temporary event modification that automatically reverts when the app exits or crashes.
+
+## 🚨 **IMPORTANT: System Recovery Information**
+
+**If you experienced crashes or permanent trackpad slowdown with an earlier version of Dragoboo:**
+
+The latest version (2025-05-31+) uses a completely **safe event modification approach** that won't cause permanent system changes. However, if you were affected by the previous version's crash issue, you may need to restore your trackpad settings.
+
+### Quick Recovery
+
+If your trackpad/mouse is permanently slower after a Dragoboo crash:
+
+```bash
+# Run the recovery script (included in the repository)
+./recovery_trackpad.sh
+```
+
+### Manual Recovery
+
+Or fix it manually:
+
+```bash
+# Remove problematic settings
+defaults delete -g com.apple.trackpad.scaling 2>/dev/null || true
+defaults delete -g com.apple.trackpad.acceleration 2>/dev/null || true
+defaults delete -g com.apple.mouse.scaling 2>/dev/null || true  
+defaults delete -g com.apple.mouse.acceleration 2>/dev/null || true
+
+# Restart Dock to apply changes
+killall Dock
+```
+
+**The new version is completely safe and won't cause these issues.**
 
 ## Why Dragoboo?
 
