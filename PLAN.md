@@ -1,99 +1,53 @@
-# Dragoboo Rewrite Plan
+# Dragoboo v2.0 Rewrite Plan
 
-**Comprehensive codebase simplification and technical debt elimination**
+**Advanced precision control with configurable modifiers and drag acceleration**
 
-## 🎯 Current Status: ✅ REWRITE COMPLETE
+## 🎯 Current Status: v1.5 Complete ✅ → v2.0 Design Required
 
-**Core functionality is working perfectly** through cursor warping approach, and the codebase has been successfully simplified with all technical debt eliminated. Clean, focused implementation achieved.
+**The codebase simplification is complete.** SystemSpeedController eliminated, PrecisionEngine implemented, and technical debt removed. Now implementing v2.0 with enhanced UI and drag acceleration features.
 
-## 📊 Codebase Analysis
+## 📊 Current Architecture State ✅
 
-### ✅ COMPLETED Results
-- **PointerScaler.swift**: 433 lines → **REMOVED** (replaced by PrecisionEngine)
-- **SystemSpeedController.swift**: 458 lines → **REMOVED** (100% elimination)
-- **PrecisionEngine.swift**: **273 lines** (new, 37% smaller than PointerScaler)
-- **ContentView.swift**: 170 → **125 lines** (26% reduction)  
-- **DragobooApp.swift**: 116 → **88 lines** (24% reduction)
-- **Total reduction**: **~750 lines removed** (60% codebase reduction)
+### ✅ COMPLETED v1.5 Cleanup
+- **PrecisionEngine.swift**: 353 lines (clean implementation)
+- **ContentView.swift**: 127 lines (simplified UI)  
+- **DragobooApp.swift**: 89 lines (streamlined state)
+- **SystemSpeedController.swift**: ❌ REMOVED (458 lines eliminated)
+- **Total**: Clean, maintainable codebase with cursor warping approach
 
-### ✅ Problems RESOLVED
-1. **Excessive debugging output** - ✅ All print statements and debug timers removed
-2. **Dead code accumulation** - ✅ SystemSpeedController completely eliminated
-3. **Multiple implementation attempts** - ✅ Single clean cursor warping approach
-4. **Complex error handling** - ✅ Simplified to essential error cases only
-5. **UI complexity** - ✅ Streamlined to core functionality with simple status display
+### ✅ Working Functionality
+- fn key detection via `.maskSecondaryFn`
+- Cursor scaling with fractional accumulation
+- Safe cursor warping without system modifications
+- Menu bar integration with real-time feedback
+- Settings persistence via UserDefaults
 
-## 🚀 Rewrite Strategy
+## 🚀 v2.0 New Requirements
 
-### Phase 1: Remove SystemSpeedController Entirely ✅ COMPLETE
-**Rationale**: The 458-line SystemSpeedController was disabled for safety reasons and cursor warping makes it unnecessary.
+### UI Redesign Specifications
 
-**✅ COMPLETED Actions**:
-1. ✅ Deleted `/Sources/DragobooCore/SystemSpeedController.swift`
-2. ✅ Removed HID access properties from `AppState` (`isHIDAccessAvailable`, `lastError`)
-3. ✅ Removed `checkHIDAccess()` method and related logic
-4. ✅ Removed HID-related UI components from `ContentView.swift`
+**Widget Width**: Designed for 400px sliders to fit perfectly
 
-### Phase 2: Simplify PointerScaler → PrecisionEngine ✅ COMPLETE
-**Target**: Reduce from 430 lines to ~150 lines while preserving working cursor warping.
-**✅ ACHIEVED**: 433 lines → 273 lines (37% reduction)
+#### Section 1: Slow Speed Control
+- **"Slow speed" slider**: 400px wide, shows percentage (50% = 2x slowdown)
+- **Modifier button set**: Choose combination of `fn`, `ctrl`, `opt`, `cmd` for activation
+- **Percentage display**: Clear visual feedback of current slowdown
 
-**✅ COMPLETED Actions**:
-```swift
-// ✅ REMOVED: All excessive debugging (dozens of print statements)
-// ✅ REMOVED: Debug timer and diagnostics (startDebugTimer, debugCurrentState, addDiagnostics)  
-// ✅ REMOVED: Secure input mode checking (checkSecureInputMode)
-// ✅ REMOVED: Event type debugging (debugEventType method)
-// ✅ PRESERVED: Essential cursor warping algorithm with accumulation
-// ✅ PRESERVED: fn key detection via .maskSecondaryFn
-// ✅ PRESERVED: Scroll event modification
-// ✅ PRESERVED: UI callback system (onPrecisionModeChange)
-```
+#### Section 2: Drag Acceleration  
+- **"Drag acceleration" slider**: 400px wide, controls acceleration radius
+- **Behavior**: Start at slow speed, accelerate to normal speed over distance
+- **Acceleration curve**: Non-linear (slow increase near start, faster increase with distance)
 
-**Essential PrecisionEngine structure**:
-```swift
-public class PrecisionEngine {
-    // Core state only
-    private var eventTap: CFMachPort?
-    private var runLoopSource: CFRunLoopSource?
-    private var precisionFactor: Double
-    private var isInPrecisionMode = false
-    private var accumulatedX: Double = 0.0
-    private var accumulatedY: Double = 0.0
-    private var lastCursorPosition: CGPoint = .zero
-    
-    public var onPrecisionModeChange: ((Bool) -> Void)?
-    
-    // Essential methods only
-    public init(precisionFactor: Double)
-    public func start() throws
-    public func stop()
-    public func updatePrecisionFactor(_ factor: Double)
-    
-    // Core event handling
-    private func handleEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>?
-    private func handleFlagsChanged(event: CGEvent)
-    private func handleFnKeyStateChange(isPressed: Bool)
-    private func modifyMovementEvent(event: CGEvent) -> Unmanaged<CGEvent>?
-    private func modifyScrollEvent(event: CGEvent) -> Unmanaged<CGEvent>?
-}
-```
+#### Layout Requirements
+- **Compact and minimal**: Clear without clutter
+- **Logical structure**: Intuitive grouping and flow
+- **Quit button**: Positioned on the right
 
-### Phase 3: Simplify ContentView ✅ COMPLETE
-**Target**: Reduce from 170 lines to ~80 lines by removing SystemSpeedController-related UI.
-**✅ ACHIEVED**: 170 → 125 lines (26% reduction)
+## 📋 v2.0 Implementation Plan
 
-**✅ COMPLETED Actions**:
-```swift
-// ✅ REMOVED: HID access status warnings
-// ✅ REMOVED: System speed validation timer and complex StatusIndicator logic
-// ✅ REMOVED: Complex error display components  
-// ✅ SIMPLIFIED: StatusIndicator to simple active/ready status with color dot
-// ✅ PRESERVED: Core settings slider and fn key instructions
-// ✅ PRESERVED: Accessibility permission flow
-```
+### Phase 1: UI Architecture Redesign 🔄
 
-**Simplified ContentView structure**:
+**New ContentView Structure**:
 ```swift
 struct ContentView: View {
     @EnvironmentObject var appState: AppState
@@ -103,287 +57,467 @@ struct ContentView: View {
             if !appState.isAccessibilityGranted {
                 AccessibilityRequestView()
             } else {
-                PrecisionSettingsView()
+                // NEW: v2.0 UI Layout
+                VStack(spacing: 16) {
+                    SlowSpeedSection()
+                    Divider()
+                    DragAccelerationSection()
+                }
             }
             
             HStack {
-                Button("Quit") { NSApplication.shared.terminate(nil) }
                 Spacer()
-                if appState.isAccessibilityGranted {
-                    SimpleStatusIndicator()
+                Button("Quit") { NSApplication.shared.terminate(nil) }
+            }
+        }
+        .padding()
+        .frame(width: 480) // Adjusted for 400px sliders + padding
+    }
+}
+```
+
+**Section 1: Slow Speed Control**:
+```swift
+struct SlowSpeedSection: View {
+    @EnvironmentObject var appState: AppState
+    @State private var slowSpeedPercentage: Double = 50.0 // 50% = 2x slowdown
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Slow Speed")
+                .font(.headline)
+            
+            // Percentage slider (400px wide)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Slowdown:")
+                    Spacer()
+                    Text("\(Int(slowSpeedPercentage))%")
+                        .monospacedDigit()
+                        .foregroundColor(.secondary)
                 }
+                
+                Slider(value: $slowSpeedPercentage, in: 10...100, step: 5) { _ in
+                    // Convert percentage to precision factor: 50% = 2x, 25% = 4x, etc.
+                    let factor = 100.0 / slowSpeedPercentage
+                    appState.updatePrecisionFactor(factor)
+                }
+                .frame(width: 400)
+            }
+            
+            // Modifier key selection
+            ModifierKeySelector()
+        }
+    }
+}
+```
+
+**Modifier Key Selection Component**:
+```swift
+struct ModifierKeySelector: View {
+    @EnvironmentObject var appState: AppState
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Activation Keys:")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            
+            HStack(spacing: 8) {
+                ModifierButton(key: .fn, label: "fn", isSelected: appState.modifierKeys.contains(.fn))
+                ModifierButton(key: .control, label: "ctrl", isSelected: appState.modifierKeys.contains(.control))
+                ModifierButton(key: .option, label: "opt", isSelected: appState.modifierKeys.contains(.option))
+                ModifierButton(key: .command, label: "cmd", isSelected: appState.modifierKeys.contains(.command))
+            }
+        }
+    }
+}
+
+struct ModifierButton: View {
+    let key: ModifierKey
+    let label: String
+    let isSelected: Bool
+    @EnvironmentObject var appState: AppState
+    
+    var body: some View {
+        Button(label) {
+            appState.toggleModifierKey(key)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .background(isSelected ? Color.accentColor : Color.clear)
+        .foregroundColor(isSelected ? .white : .primary)
+    }
+}
+```
+
+**Section 2: Drag Acceleration**:
+```swift
+struct DragAccelerationSection: View {
+    @EnvironmentObject var appState: AppState
+    @State private var accelerationRadius: Double = 200.0 // pixels
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Drag Acceleration")
+                .font(.headline)
+            
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Acceleration Distance:")
+                    Spacer()
+                    Text("\(Int(accelerationRadius))px")
+                        .monospacedDigit()
+                        .foregroundColor(.secondary)
+                }
+                
+                Slider(value: $accelerationRadius, in: 50...1000, step: 25) { _ in
+                    appState.updateAccelerationRadius(accelerationRadius)
+                }
+                .frame(width: 400)
+            }
+            
+            Text("Speed increases from slow to normal over this distance")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+    }
+}
+```
+
+### Phase 2: AppState Enhancement 🔄
+
+**Extended AppState for v2.0**:
+```swift
+enum ModifierKey: CaseIterable {
+    case fn, control, option, command
+    
+    var cgEventFlag: CGEventFlags {
+        switch self {
+        case .fn: return .maskSecondaryFn
+        case .control: return .maskControl
+        case .option: return .maskAlternate
+        case .command: return .maskCommand
+        }
+    }
+}
+
+class AppState: ObservableObject {
+    @Published var isPrecisionModeActive = false
+    @Published var isAccessibilityGranted = false
+    @Published var isDragging = false
+    
+    // v2.0: Percentage-based precision factor (50% = 2x slowdown)
+    @AppStorage("slowSpeedPercentage") var slowSpeedPercentage: Double = 50.0
+    
+    // v2.0: Configurable modifier keys
+    @AppStorage("modifierKeys") private var modifierKeysData: Data = Data()
+    
+    // v2.0: Drag acceleration settings
+    @AppStorage("accelerationRadius") var accelerationRadius: Double = 200.0
+    
+    var modifierKeys: Set<ModifierKey> {
+        get {
+            guard let decoded = try? JSONDecoder().decode(Set<ModifierKey>.self, from: modifierKeysData) else {
+                return [.fn] // Default to fn key
+            }
+            return decoded
+        }
+        set {
+            modifierKeysData = (try? JSONEncoder().encode(newValue)) ?? Data()
+            precisionEngine?.updateModifierKeys(newValue)
+        }
+    }
+    
+    // Computed precision factor from percentage
+    var precisionFactor: Double {
+        return 100.0 / slowSpeedPercentage
+    }
+    
+    private var precisionEngine: PrecisionEngine?
+    private let logger = Logger(subsystem: "com.dragoboo.app", category: "AppState")
+    
+    func toggleModifierKey(_ key: ModifierKey) {
+        var keys = modifierKeys
+        if keys.contains(key) {
+            keys.remove(key)
+        } else {
+            keys.insert(key)
+        }
+        modifierKeys = keys
+    }
+    
+    func updateSlowSpeedPercentage(_ percentage: Double) {
+        slowSpeedPercentage = percentage
+        precisionEngine?.updatePrecisionFactor(precisionFactor)
+    }
+    
+    func updateAccelerationRadius(_ radius: Double) {
+        accelerationRadius = radius
+        precisionEngine?.updateAccelerationRadius(radius)
+    }
+}
+```
+
+### Phase 3: PrecisionEngine v2.0 Enhancement 🔄
+
+**Enhanced PrecisionEngine for Drag Acceleration**:
+```swift
+public class PrecisionEngine {
+    // Existing properties...
+    private var modifierKeys: Set<ModifierKey> = [.fn]
+    private var accelerationRadius: Double = 200.0
+    
+    // NEW: Drag state tracking
+    private var isDragging = false
+    private var dragStartPosition: CGPoint = .zero
+    private var currentDragDistance: Double = 0.0
+    
+    public func updateModifierKeys(_ keys: Set<ModifierKey>) {
+        modifierKeys = keys
+        logger.info("Updated modifier keys: \(keys)")
+    }
+    
+    public func updateAccelerationRadius(_ radius: Double) {
+        accelerationRadius = radius
+        logger.info("Updated acceleration radius: \(radius)")
+    }
+    
+    // Enhanced event handling for drag detection
+    private func handleEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        switch type {
+        case .flagsChanged:
+            handleFlagsChanged(event: event)
+            
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+            if isInPrecisionMode {
+                startDragTracking(at: getCursorPosition())
+            }
+            
+        case .leftMouseUp, .rightMouseUp, .otherMouseUp:
+            if isDragging {
+                stopDragTracking()
+            }
+            
+        case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
+            if isInPrecisionMode {
+                return modifyMovementEvent(event: event, isDragEvent: type != .mouseMoved)
+            }
+            
+        // ... rest of existing cases
+        }
+        
+        return Unmanaged.passUnretained(event)
+    }
+    
+    // Enhanced movement modification with drag acceleration
+    private func modifyMovementEvent(event: CGEvent, isDragEvent: Bool) -> Unmanaged<CGEvent>? {
+        // Get movement delta
+        let deltaX = getMovementDelta(event: event, axis: .x)
+        let deltaY = getMovementDelta(event: event, axis: .y)
+        
+        guard deltaX != 0 || deltaY != 0 else {
+            return Unmanaged.passUnretained(event)
+        }
+        
+        // Calculate effective precision factor
+        let effectiveFactor = calculateEffectivePrecisionFactor(isDragging: isDragEvent)
+        
+        // Apply scaling with accumulation
+        accumulatedX += deltaX / effectiveFactor
+        accumulatedY += deltaY / effectiveFactor
+        
+        let scaledX = Int(accumulatedX)
+        let scaledY = Int(accumulatedY)
+        
+        accumulatedX -= Double(scaledX)
+        accumulatedY -= Double(scaledY)
+        
+        // Update drag distance if dragging
+        if isDragEvent && isDragging {
+            currentDragDistance += sqrt(Double(scaledX * scaledX + scaledY * scaledY))
+        }
+        
+        // Apply cursor warping
+        let newPosition = CGPoint(
+            x: lastCursorPosition.x + Double(scaledX),
+            y: lastCursorPosition.y + Double(scaledY)
+        )
+        
+        if CGWarpMouseCursorPosition(newPosition) == .success {
+            lastCursorPosition = newPosition
+        } else {
+            return Unmanaged.passUnretained(event)
+        }
+        
+        return nil
+    }
+    
+    // NEW: Drag acceleration calculation
+    private func calculateEffectivePrecisionFactor(isDragging: Bool) -> Double {
+        guard isDragging && self.isDragging else {
+            return precisionFactor
+        }
+        
+        // Non-linear acceleration curve
+        let progress = min(currentDragDistance / accelerationRadius, 1.0)
+        
+        // Cubic easing function for non-linear acceleration
+        // Slow increase near start, faster increase with distance
+        let easedProgress = progress * progress * (3.0 - 2.0 * progress)
+        
+        // Interpolate between precision factor and 1.0 (normal speed)
+        return precisionFactor * (1.0 - easedProgress) + 1.0 * easedProgress
+    }
+    
+    // Enhanced modifier key detection
+    private func handleFlagsChanged(event: CGEvent) {
+        let flags = event.flags
+        
+        // Check if any configured modifier keys are pressed
+        let wasActive = fnKeyPressed
+        fnKeyPressed = modifierKeys.contains { key in
+            flags.contains(key.cgEventFlag)
+        }
+        
+        if wasActive != fnKeyPressed {
+            handleActivationStateChange(isPressed: fnKeyPressed)
+        }
+    }
+    
+    private func startDragTracking(at position: CGPoint) {
+        isDragging = true
+        dragStartPosition = position
+        currentDragDistance = 0.0
+        logger.debug("Started drag tracking at \(position)")
+    }
+    
+    private func stopDragTracking() {
+        isDragging = false
+        currentDragDistance = 0.0
+        logger.debug("Stopped drag tracking")
+    }
+}
+```
+
+### Phase 4: UI Polish and Integration 🔄
+
+**Enhanced Menu Bar Integration**:
+```swift
+struct ContentView: View {
+    @EnvironmentObject var appState: AppState
+    
+    var body: some View {
+        VStack(spacing: 20) {
+            if !appState.isAccessibilityGranted {
+                AccessibilityRequestView()
+            } else {
+                VStack(spacing: 16) {
+                    SlowSpeedSection()
+                    Divider()
+                    DragAccelerationSection()
+                    StatusSection()
+                }
+            }
+            
+            HStack {
+                StatusIndicator()
+                Spacer()
+                Button("Quit") {
+                    NSApplication.shared.terminate(nil)
+                }
+                .keyboardShortcut("q", modifiers: .command)
             }
         }
         .onAppear { appState.refreshPermissions() }
         .padding()
-        .frame(width: 300)
+        .frame(width: 480)
     }
 }
 
-struct PrecisionSettingsView: View {
-    // Just slider + fn key instruction + active status
-    // Remove all error/HID status complexity
-}
-
-struct SimpleStatusIndicator: View {
-    // Just active/inactive with color dot
-    // Remove validation timers and complex status
-}
-```
-
-### Phase 4: Simplify AppState ✅ COMPLETE
-**Target**: Reduce from 116 lines to ~60 lines.
-**✅ ACHIEVED**: 116 → 88 lines (24% reduction)
-
-**✅ COMPLETED Actions**:
-```swift
-// ✅ REMOVED: HID access management (@Published isHIDAccessAvailable, checkHIDAccess())
-// ✅ REMOVED: Error state management (@Published lastError, complex error handling)
-// ✅ SIMPLIFIED: Permission refresh logic (removed HID checks)
-// ✅ RENAMED: PointerScaler → PrecisionEngine throughout
-// ✅ SIMPLIFIED: setupPrecisionEngine without complex error state
-// ✅ PRESERVED: Core functionality (accessibility check, precision factor, UI callbacks)
-```
-
-**Simplified AppState structure**:
-```swift
-class AppState: ObservableObject {
-    @Published var isPrecisionModeActive = false
-    @Published var isAccessibilityGranted = false
-    @AppStorage("precisionFactor") var precisionFactor: Double = 4.0
+struct StatusSection: View {
+    @EnvironmentObject var appState: AppState
     
-    private var precisionEngine: PrecisionEngine?
-    
-    init() {
-        checkAccessibility()
-        setupPrecisionEngine()
-    }
-    
-    private func checkAccessibility() {
-        isAccessibilityGranted = AXIsProcessTrusted()
-    }
-    
-    func requestAccessibility() {
-        // Simple accessibility request
-    }
-    
-    private func setupPrecisionEngine() {
-        // Simple engine setup without error complexity
-    }
-    
-    func updatePrecisionFactor(_ factor: Double) {
-        precisionFactor = factor
-        precisionEngine?.updatePrecisionFactor(factor)
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            let activeKeys = appState.modifierKeys.map { key in
+                switch key {
+                case .fn: return "fn"
+                case .control: return "ctrl"
+                case .option: return "opt"
+                case .command: return "cmd"
+                }
+            }.joined(separator: " + ")
+            
+            Label("Hold \(activeKeys) to activate precision mode", systemImage: "keyboard")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            
+            if appState.isPrecisionModeActive {
+                Label("Precision mode active", systemImage: "checkmark.circle.fill")
+                    .font(.caption)
+                    .foregroundColor(.green)
+                
+                if appState.isDragging {
+                    Label("Drag acceleration active", systemImage: "arrow.up.right")
+                        .font(.caption)
+                        .foregroundColor(.blue)
+                }
+            }
+        }
     }
 }
 ```
 
-## 📋 Step-by-Step Implementation Guide
+## 🎯 Implementation Schedule
 
-### Step 1: Prepare for SystemSpeedController Removal
-```bash
-# 1. Search for all SystemSpeedController references
-grep -r "SystemSpeedController" Sources/
-grep -r "isHIDAccessAvailable" Sources/
-grep -r "lastError" Sources/
+### Week 1: UI Foundation 🔄
+- [ ] Design new 400px slider components
+- [ ] Implement percentage-based slow speed control
+- [ ] Create modifier key selection interface
+- [ ] Update ContentView layout for new width requirements
 
-# 2. Document all integration points before removal
-```
+### Week 2: Modifier System 🔄
+- [ ] Extend PrecisionEngine for configurable modifier keys
+- [ ] Implement modifier key combination detection
+- [ ] Add modifier key persistence to AppState
+- [ ] Test modifier key functionality across different combinations
 
-### Step 2: Clean Removal Process
-```swift
-// 1. Delete the file
-rm Sources/DragobooCore/SystemSpeedController.swift
+### Week 3: Drag Acceleration 🔄
+- [ ] Implement drag state detection in PrecisionEngine
+- [ ] Create non-linear acceleration algorithm
+- [ ] Add drag acceleration slider and controls
+- [ ] Integrate drag distance tracking with cursor warping
 
-// 2. Remove from Package.swift if explicitly listed
+### Week 4: Polish and Testing 🔄
+- [ ] Refine acceleration curve for optimal user experience
+- [ ] Add visual feedback for drag acceleration state
+- [ ] Comprehensive testing across different use cases
+- [ ] Performance optimization and final polish
 
-// 3. Remove from DragobooApp.swift:
-// - Remove isHIDAccessAvailable property
-// - Remove checkHIDAccess() method
-// - Remove lastError property and related logic
+## ✅ Success Criteria
 
-// 4. Remove from ContentView.swift:
-// - Remove HID access status labels
-// - Remove error display components
-// - Remove system speed validation timer
-```
+### Functional Requirements ✅
+- [ ] Percentage-based speed control (10%-100% range)
+- [ ] Configurable modifier key combinations work reliably
+- [ ] Drag acceleration with non-linear speed increase
+- [ ] Smooth transition from slow to normal speed during drag
+- [ ] 400px sliders fit perfectly in redesigned interface
 
-### Step 3: PointerScaler → PrecisionEngine Transformation
-```swift
-// 1. Create new file: Sources/DragobooCore/PrecisionEngine.swift
-// 2. Copy essential logic from PointerScaler.swift:
-//    - Event tap creation and management
-//    - fn key detection via flagsChanged
-//    - Movement scaling with accumulation
-//    - Cursor warping implementation
-//    - Scroll event modification
+### User Experience Requirements ✅
+- [ ] Intuitive percentage display (50% = half speed)
+- [ ] Clear modifier key selection with visual feedback
+- [ ] Responsive drag acceleration with immediate feedback
+- [ ] Compact, minimal interface without clutter
+- [ ] Logical information hierarchy and grouping
 
-// 3. REMOVE from new PrecisionEngine:
-//    - All print() statements
-//    - All logger.debug() calls (keep only essential logger.info/warning/error)
-//    - Debug timer and diagnostics
-//    - Secure input mode checking
-//    - Event type debugging methods
-//    - Excessive state tracking variables
-
-// 4. Rename in codebase:
-//    - PointerScaler → PrecisionEngine
-//    - Update all references in DragobooApp.swift
-```
-
-### Step 4: UI Simplification
-```swift
-// 1. Remove complex StatusIndicator
-// 2. Create SimpleStatusIndicator with just:
-//    - Circle color (gray/green)
-//    - Text ("Ready"/"Active")
-//    - No timers or validation
-
-// 3. Simplify PrecisionSettingsView:
-//    - Keep slider
-//    - Keep fn key instruction
-//    - Keep active status display
-//    - Remove error display
-//    - Remove HID status warnings
-
-// 4. Remove AccessibilityRequestView complexity:
-//    - Keep simple permission request
-//    - Remove error state handling
-```
-
-### Step 5: Testing and Validation
-```swift
-// 1. Ensure core functionality still works:
-//    - fn key detection
-//    - Cursor scaling with accumulation
-//    - Cursor warping
-//    - Settings persistence
-
-// 2. Verify UI simplification:
-//    - Menu bar interface clean
-//    - No error states from removed systems
-//    - Accessibility flow works
-
-// 3. Check file structure:
-//    - No references to SystemSpeedController
-//    - No unused imports
-//    - No dead code warnings
-```
-
-## ✅ FINAL RESULTS ACHIEVED
-
-### Code Metrics ✅ COMPLETED
-- **PointerScaler.swift**: 433 → **REMOVED** (replaced by PrecisionEngine)
-- **PrecisionEngine.swift**: **273 lines** (37% smaller than PointerScaler)
-- **SystemSpeedController.swift**: 458 → **0 lines** (100% removal)
-- **ContentView.swift**: 170 → **125 lines** (26% reduction)
-- **DragobooApp.swift**: 116 → **88 lines** (24% reduction)
-- **Total reduction**: **~750 lines removed** (60% codebase reduction)
-
-### Architecture Benefits ✅ ACHIEVED
-- ✅ **Single Working Approach**: Only cursor warping, no legacy system modification code
-- ✅ **Reduced Complexity**: No error handling for removed systems
-- ✅ **Improved Maintainability**: Clear, focused code without debug artifacts
-- ✅ **Better Performance**: No debug timers or excessive logging
-- ✅ **Safer Codebase**: No dangerous system modification paths, even disabled ones
-
-### Development Benefits ✅ ACHIEVED
-- ✅ **Faster Compilation**: Significantly less code to compile
-- ✅ **Easier Debugging**: No debug noise in logs
-- ✅ **Simpler Testing**: Fewer edge cases and error states
-- ✅ **Cleaner Git History**: Future changes will be easier to track
-- ✅ **Better Onboarding**: New developers can understand the codebase quickly
-
-## ✅ Critical Preservation VERIFIED
-
-### ✅ Core Functionality PRESERVED
-```swift
-// Essential cursor warping algorithm
-accumulatedX += deltaX / precisionFactor
-accumulatedY += deltaY / precisionFactor
-
-let scaledX = Int(accumulatedX)
-let scaledY = Int(accumulatedY)
-
-accumulatedX -= Double(scaledX)
-accumulatedY -= Double(scaledY)
-
-let newPosition = CGPoint(
-    x: lastCursorPosition.x + Double(scaledX),
-    y: lastCursorPosition.y + Double(scaledY)
-)
-CGWarpMouseCursorPosition(newPosition)
-```
-
-### ✅ User Experience PRESERVED
-- ✅ fn key activation/deactivation
-- ✅ Settings slider and persistence
-- ✅ Menu bar integration
-- ✅ Accessibility permission flow
-- ✅ Cursor warping precision and responsiveness
-
-## ✅ Implementation COMPLETED
-
-### ✅ Analysis and Preparation COMPLETE
-- ✅ Complete reference audit for SystemSpeedController
-- ✅ Document all integration points
-- ✅ Identified all files requiring modification
-- ✅ Validated working cursor warping approach
-
-### ✅ Core Rewrite COMPLETE
-- ✅ Remove SystemSpeedController entirely (458 lines)
-- ✅ Create simplified PrecisionEngine (273 lines)
-- ✅ Update all references and imports
-- ✅ Successful compilation and testing
-
-### ✅ UI Simplification COMPLETE
-- ✅ Simplify ContentView components (170→125 lines)
-- ✅ Reduce AppState complexity (116→88 lines)
-- ✅ Remove error handling for removed systems
-- ✅ Streamlined accessibility flow
-
-### ✅ Final Validation COMPLETE
-- ✅ Successful compilation (swift build)
-- ✅ All functionality preserved
-- ✅ Code structure clean and maintainable
-- ✅ Documentation updated
-
-## ✅ Success Criteria ACHIEVED
-
-### Functional Requirements ✅ VERIFIED
-- ✅ fn key detection works reliably
-- ✅ Cursor scaling with accumulation is precise
-- ✅ Cursor warping functions across all applications
-- ✅ Settings persist correctly
-- ✅ Menu bar interface is responsive
-- ✅ Accessibility permissions flow works
-
-### Code Quality Requirements ✅ VERIFIED
-- ✅ No references to SystemSpeedController
-- ✅ No debug print statements in production code
-- ✅ No unused imports or dead code
-- ✅ Clean, readable code structure
-- ✅ Comprehensive code documentation
-- ✅ Successful compilation without warnings
-
-### Performance Requirements ✅ VERIFIED
-- ✅ fn key activation latency optimized
-- ✅ Minimal CPU usage during precision mode
-- ✅ No debug timers or excessive logging
-- ✅ Fast app startup and shutdown
-- ✅ Responsive UI interactions
+### Technical Requirements ✅
+- [ ] Maintains all existing safety features (cursor warping)
+- [ ] Settings persistence across app restarts
+- [ ] Performance equivalent to v1.5 implementation
+- [ ] Clean, maintainable code architecture
+- [ ] Backward compatibility with existing precision algorithms
 
 ---
 
-## 🏆 MISSION ACCOMPLISHED
-
-**The comprehensive rewrite has successfully transformed Dragoboo from a complex, debt-laden codebase (1,174+ lines) into a clean, maintainable, and focused precision cursor control utility (486 lines total).**
-
-### 🎯 Summary of Achievement
-- **60% codebase reduction** (~750 lines removed)
-- **100% functionality preservation** (cursor warping with accumulation)
-- **Zero technical debt** (no debug artifacts, dead code, or unused systems)
-- **Clean architecture** (single working approach, no legacy complexity)
-- **Successful compilation** (no warnings or errors)
-
-**The rewrite is complete and ready for production use.** 🚀
+**v2.0 will transform Dragoboo from a simple fn-key precision tool into a sophisticated cursor control system with customizable activation and intelligent drag acceleration.**
