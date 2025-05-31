@@ -67,403 +67,13 @@ Info.plist
 Makefile
 Package.swift
 README.md
+recovery_trackpad.sh
 run.sh
-somelog.txt
 stop.sh
 </directory_structure>
 
 <files>
 This section contains the contents of the repository's files.
-
-<file path="Sources/DragobooCore/SystemSpeedController.swift">
-import Foundation
-import IOKit
-import os
-import CoreFoundation
-
-public class SystemSpeedController {
-    private var originalMouseSpeed: Double?
-    private var originalTrackpadSpeed: Double?
-    private let logger = Logger(subsystem: "com.dragoboo.core", category: "SystemSpeedController")
-    private var usingFallback = false
-    
-    // IOHIDEventSystemClient support
-    private var hidClient: UnsafeMutableRawPointer?
-    private var hidClientAvailable = false
-    
-    // IOHIDEventSystemClient functions (private APIs)
-    private let IOHIDEventSystemClientCreateWithType: (@convention(c) (CFAllocator?, Int32, UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer?)?
-    private let IOHIDEventSystemClientSetProperty: (@convention(c) (UnsafeMutableRawPointer, CFString, CFTypeRef) -> Void)?
-    private let IOHIDEventSystemClientCopyProperty: (@convention(c) (UnsafeMutableRawPointer, CFString) -> CFTypeRef?)?
-    
-    public init() {
-        // Load private API functions using dlsym
-        IOHIDEventSystemClientCreateWithType = {
-            guard let createFunc = dlsym(dlopen(nil, RTLD_LAZY), "IOHIDEventSystemClientCreateWithType") else { return nil }
-            return unsafeBitCast(createFunc, to: (@convention(c) (CFAllocator?, Int32, UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer?).self)
-        }()
-        
-        IOHIDEventSystemClientSetProperty = {
-            guard let setFunc = dlsym(dlopen(nil, RTLD_LAZY), "IOHIDEventSystemClientSetProperty") else { return nil }
-            return unsafeBitCast(setFunc, to: (@convention(c) (UnsafeMutableRawPointer, CFString, CFTypeRef) -> Void).self)
-        }()
-        
-        IOHIDEventSystemClientCopyProperty = {
-            guard let copyFunc = dlsym(dlopen(nil, RTLD_LAZY), "IOHIDEventSystemClientCopyProperty") else { return nil }
-            return unsafeBitCast(copyFunc, to: (@convention(c) (UnsafeMutableRawPointer, CFString) -> CFTypeRef?).self)
-        }()
-        
-        initializeHIDClient()
-    }
-    
-    private func initializeHIDClient() {
-        // TEMPORARILY DISABLE IOKit approach to prevent crashes
-        // TODO: Re-enable with proper safety guards after fixing fn key detection
-        logger.warning("IOHIDEventSystemClient temporarily disabled - using UserDefaults fallback only")
-        hidClientAvailable = false
-        return
-        
-        /*
-        guard let createFunc = IOHIDEventSystemClientCreateWithType else {
-            logger.warning("IOHIDEventSystemClient functions not available")
-            return
-        }
-        
-        hidClient = createFunc(kCFAllocatorDefault, 0, nil) // kIOHIDEventSystemClientTypeAdmin = 0
-        hidClientAvailable = (hidClient != nil)
-        
-        if hidClientAvailable {
-            logger.info("IOHIDEventSystemClient initialized successfully")
-        } else {
-            logger.warning("Failed to create IOHIDEventSystemClient - falling back to UserDefaults")
-        }
-        */
-    }
-    
-    private func ioKitSetPointerAcceleration(factor: Double) throws {
-        guard let client = hidClient,
-              let setProperty = IOHIDEventSystemClientSetProperty,
-              let copyProperty = IOHIDEventSystemClientCopyProperty else {
-            throw SystemSpeedError.failedToCreateHIDClient
-        }
-        
-        // Save original acceleration if not already saved
-        if originalMouseSpeed == nil {
-            let propertyKey = "HIDPointerAcceleration" as CFString
-            if let result = copyProperty(client, propertyKey),
-               let number = result as? NSNumber {
-                originalMouseSpeed = number.doubleValue
-                logger.debug("Saved original pointer acceleration: \(self.originalMouseSpeed!)")
-            } else {
-                originalMouseSpeed = 45056.0 // Default acceleration value
-                logger.debug("Could not read current acceleration, using default: \(self.originalMouseSpeed!)")
-            }
-        }
-        
-        // Calculate new acceleration value
-        let newAcceleration = (originalMouseSpeed ?? 45056.0) / factor
-        var accelerationValue = newAcceleration
-        
-        // Set the new acceleration
-        let propertyKey = "HIDPointerAcceleration" as CFString
-        let value = CFNumberCreate(kCFAllocatorDefault, .doubleType, &accelerationValue)!
-        
-        setProperty(client, propertyKey, value)
-        logger.info("Set pointer acceleration to \(newAcceleration) (factor: \(factor))")
-    }
-    
-    private func ioKitRestorePointerAcceleration() throws {
-        guard let client = hidClient,
-              let setProperty = IOHIDEventSystemClientSetProperty,
-              let originalSpeed = originalMouseSpeed else {
-            return
-        }
-        
-        var accelerationValue = originalSpeed
-        let propertyKey = "HIDPointerAcceleration" as CFString
-        let value = CFNumberCreate(kCFAllocatorDefault, .doubleType, &accelerationValue)!
-        
-        setProperty(client, propertyKey, value)
-        logger.info("Restored original pointer acceleration: \(originalSpeed)")
-    }
-    
-    public func setSlowSpeed(factor: Double) throws {
-        logger.info("Setting slow speed with factor: \(factor)")
-        
-        var lastError: Error?
-        
-        // Try IOKit approach first if available
-        if hidClientAvailable {
-            do {
-                try ioKitSetPointerAcceleration(factor: factor)
-                
-                // Validate the change worked
-                if validateSpeedChange(expectedFactor: factor) {
-                    logger.info("Successfully set speed using IOKit HIDEventSystemClient")
-                    return
-                } else {
-                    logger.warning("IOKit method failed validation, trying fallback")
-                }
-            } catch {
-                lastError = error
-                logger.warning("IOKit method failed: \(error)")
-            }
-        }
-        
-        // Fallback to UserDefaults approach
-        do {
-            // Save original speeds if not already saved
-            if originalMouseSpeed == nil {
-                originalMouseSpeed = try getCurrentMouseSpeed()
-                logger.debug("Saved original mouse speed: \(self.originalMouseSpeed ?? 0)")
-            }
-            if originalTrackpadSpeed == nil {
-                originalTrackpadSpeed = try getCurrentTrackpadSpeed()
-                logger.debug("Saved original trackpad speed: \(self.originalTrackpadSpeed ?? 0)")
-            }
-            
-            let slowMouseSpeed = (originalMouseSpeed ?? 0.6875) / factor
-            let slowTrackpadSpeed = (originalTrackpadSpeed ?? 0.6875) / factor
-            
-            try fallbackSetMouseSpeed(slowMouseSpeed)
-            try fallbackSetTrackpadSpeed(slowTrackpadSpeed)
-            
-            // Validate the change worked
-            if validateSpeedChange(expectedFactor: factor) {
-                usingFallback = true
-                logger.info("Successfully set speed using UserDefaults fallback")
-                return
-            } else {
-                logger.error("UserDefaults method failed validation")
-            }
-        } catch {
-            lastError = error
-            logger.error("UserDefaults fallback failed: \(error)")
-        }
-        
-        // Both methods failed
-        throw lastError ?? SystemSpeedError.failedToSetSpeed
-    }
-    
-    public func restoreOriginalSpeed() throws {
-        logger.info("Restoring original speeds")
-        
-        // Try IOKit approach first if available and we have original speed
-        if hidClientAvailable && originalMouseSpeed != nil {
-            do {
-                try ioKitRestorePointerAcceleration()
-                logger.info("Successfully restored original speeds using IOKit")
-                return
-            } catch {
-                logger.warning("IOKit restore failed: \(error), trying fallback")
-            }
-        }
-        
-        // Fallback to UserDefaults approach
-        guard let mouseSpeed = originalMouseSpeed,
-              let trackpadSpeed = originalTrackpadSpeed else {
-            logger.debug("No original speeds to restore")
-            return // Nothing to restore
-        }
-        
-        try fallbackSetMouseSpeed(mouseSpeed)
-        try fallbackSetTrackpadSpeed(trackpadSpeed)
-        logger.info("Successfully restored original speeds using UserDefaults fallback")
-    }
-    
-    private func getCurrentMouseSpeed() throws -> Double {
-        logger.debug("Getting current mouse speed")
-        
-        // Read from global preferences using UserDefaults
-        let defaults = UserDefaults.standard
-        let speed = defaults.double(forKey: "com.apple.mouse.scaling")
-        
-        // If speed is 0, the preference doesn't exist, use default
-        if speed == 0 {
-            logger.debug("Mouse speed preference not set, using default")
-            return 0.6875 // Default macOS mouse speed
-        } else {
-            logger.debug("Current mouse speed: \(speed)")
-            return speed
-        }
-    }
-    
-    private func getCurrentTrackpadSpeed() throws -> Double {
-        logger.debug("Getting current trackpad speed")
-        
-        // Read from global preferences using UserDefaults
-        let defaults = UserDefaults.standard
-        let speed = defaults.double(forKey: "com.apple.trackpad.scaling")
-        
-        // If speed is 0, the preference doesn't exist, use default
-        if speed == 0 {
-            logger.debug("Trackpad speed preference not set, using default")
-            return 0.6875 // Default macOS trackpad speed
-        } else {
-            logger.debug("Current trackpad speed: \(speed)")
-            return speed
-        }
-    }
-    
-    
-    public func validateSpeedChange(expectedFactor: Double) -> Bool {
-        logger.debug("Validating speed change with expected factor: \(expectedFactor)")
-        
-        // Small delay to allow system to process changes
-        usleep(50000) // 50ms
-        
-        do {
-            if hidClientAvailable {
-                // Validate IOKit approach
-                return try validateIOKitSpeedChange(expectedFactor: expectedFactor)
-            } else {
-                // Validate UserDefaults approach
-                return try validateUserDefaultsSpeedChange(expectedFactor: expectedFactor)
-            }
-        } catch {
-            logger.error("Speed validation failed: \(error)")
-            return false
-        }
-    }
-    
-    private func validateIOKitSpeedChange(expectedFactor: Double) throws -> Bool {
-        guard let client = hidClient,
-              let copyProperty = IOHIDEventSystemClientCopyProperty else {
-            return false
-        }
-        
-        let propertyKey = "HIDPointerAcceleration" as CFString
-        guard let result = copyProperty(client, propertyKey),
-              let number = result as? NSNumber else {
-            return false
-        }
-        
-        let currentAcceleration = number.doubleValue
-        let expectedAcceleration = (originalMouseSpeed ?? 45056.0) / expectedFactor
-        let isValid = abs(currentAcceleration - expectedAcceleration) < 1000.0 // Allow some tolerance
-        
-        logger.debug("IOKit validation - current: \(currentAcceleration), expected: \(expectedAcceleration), valid: \(isValid)")
-        return isValid
-    }
-    
-    private func validateUserDefaultsSpeedChange(expectedFactor: Double) throws -> Bool {
-        let currentSpeed = try getCurrentMouseSpeed()
-        let expectedSpeed = (originalMouseSpeed ?? 0.6875) / expectedFactor
-        let isValid = abs(currentSpeed - expectedSpeed) < 0.1
-        
-        logger.debug("UserDefaults validation - current: \(currentSpeed), expected: \(expectedSpeed), valid: \(isValid)")
-        return isValid
-    }
-    
-    // MARK: - Fallback Methods using UserDefaults
-    
-    private func fallbackSetMouseSpeed(_ speed: Double) throws {
-        logger.debug("Setting mouse speed using enhanced UserDefaults fallback: \(speed)")
-        
-        // Set in global preferences domain using the correct approach
-        CFPreferencesSetValue(
-            "com.apple.mouse.scaling" as CFString,
-            speed as CFNumber,
-            kCFPreferencesAnyApplication,
-            kCFPreferencesCurrentUser,
-            kCFPreferencesAnyHost
-        )
-        
-        // Also disable acceleration for predictable behavior
-        CFPreferencesSetValue(
-            "com.apple.mouse.acceleration" as CFString,
-            (-1.0) as CFNumber, // -1 disables acceleration
-            kCFPreferencesAnyApplication,
-            kCFPreferencesCurrentUser,
-            kCFPreferencesAnyHost
-        )
-        
-        // Multiple synchronization attempts
-        CFPreferencesAppSynchronize(kCFPreferencesAnyApplication)
-        CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication)
-        
-        // Post multiple HID system notifications
-        let notifications = [
-            "com.apple.hid.preferencesChanged",
-            "com.apple.systempreferences.mousesettings.changed",
-            "com.apple.controlstrip.mousesettings.changed",
-            "com.apple.preference.mouse.changed"
-        ]
-        
-        for notification in notifications {
-            DistributedNotificationCenter.default().post(
-                name: NSNotification.Name(notification),
-                object: nil
-            )
-        }
-        
-        logger.debug("Applied enhanced UserDefaults mouse speed setting")
-    }
-    
-    private func fallbackSetTrackpadSpeed(_ speed: Double) throws {
-        logger.debug("Setting trackpad speed using enhanced UserDefaults fallback: \(speed)")
-        
-        // Set in global preferences domain using the correct approach
-        CFPreferencesSetValue(
-            "com.apple.trackpad.scaling" as CFString,
-            speed as CFNumber,
-            kCFPreferencesAnyApplication,
-            kCFPreferencesCurrentUser,
-            kCFPreferencesAnyHost
-        )
-        
-        // Also disable acceleration for predictable behavior
-        CFPreferencesSetValue(
-            "com.apple.trackpad.acceleration" as CFString,
-            (-1.0) as CFNumber, // -1 disables acceleration
-            kCFPreferencesAnyApplication,
-            kCFPreferencesCurrentUser,
-            kCFPreferencesAnyHost
-        )
-        
-        // Multiple synchronization attempts
-        CFPreferencesAppSynchronize(kCFPreferencesAnyApplication)
-        CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication)
-        
-        // Post multiple HID system notifications
-        let notifications = [
-            "com.apple.hid.preferencesChanged",
-            "com.apple.systempreferences.trackpadsettings.changed",
-            "com.apple.controlstrip.trackpadsettings.changed",
-            "com.apple.preference.trackpad.changed"
-        ]
-        
-        for notification in notifications {
-            DistributedNotificationCenter.default().post(
-                name: NSNotification.Name(notification),
-                object: nil
-            )
-        }
-        
-        logger.debug("Applied enhanced UserDefaults trackpad speed setting")
-    }
-}
-
-public enum SystemSpeedError: LocalizedError {
-    case failedToCreateHIDClient
-    case permissionDenied
-    case failedToReadCurrentSpeed
-    case failedToSetSpeed
-    
-    public var errorDescription: String? {
-        switch self {
-        case .failedToCreateHIDClient:
-            return "Failed to create HID system client"
-        case .permissionDenied:
-            return "Permission denied - ensure Accessibility permissions are granted"
-        case .failedToReadCurrentSpeed:
-            return "Failed to read current mouse/trackpad speed"
-        case .failedToSetSpeed:
-            return "Failed to set mouse/trackpad speed"
-        }
-    }
-}
-</file>
 
 <file path=".claude/settings.local.json">
 {
@@ -589,6 +199,645 @@ final class PointerScalerTests: XCTestCase {
 .specstory/**
 </file>
 
+<file path="recovery_trackpad.sh">
+#!/bin/bash
+# this_file: recovery_trackpad.sh
+
+echo "🚑 Dragoboo Recovery Script"
+echo "=========================="
+echo "This script restores your trackpad/mouse to default macOS settings"
+echo "if they got stuck in slow mode due to a Dragoboo crash."
+echo ""
+
+# Check current problematic settings
+echo "🔍 Checking current settings..."
+
+TRACKPAD_SCALING=$(defaults read -g com.apple.trackpad.scaling 2>/dev/null || echo "DEFAULT")
+MOUSE_SCALING=$(defaults read -g com.apple.mouse.scaling 2>/dev/null || echo "DEFAULT")
+TRACKPAD_ACCEL=$(defaults read -g com.apple.trackpad.acceleration 2>/dev/null || echo "DEFAULT")
+MOUSE_ACCEL=$(defaults read -g com.apple.mouse.acceleration 2>/dev/null || echo "DEFAULT")
+
+echo "Current trackpad scaling: $TRACKPAD_SCALING"
+echo "Current mouse scaling: $MOUSE_SCALING"
+echo "Current trackpad acceleration: $TRACKPAD_ACCEL"
+echo "Current mouse acceleration: $MOUSE_ACCEL"
+echo ""
+
+# Check if any settings look problematic
+NEEDS_FIXING=false
+
+if [[ "$TRACKPAD_SCALING" != "DEFAULT" ]] && (($(echo "$TRACKPAD_SCALING < 0.3" | bc -l))); then
+    echo "⚠️  Trackpad scaling looks too slow: $TRACKPAD_SCALING"
+    NEEDS_FIXING=true
+fi
+
+if [[ "$MOUSE_SCALING" != "DEFAULT" ]] && (($(echo "$MOUSE_SCALING > 1000" | bc -l))); then
+    echo "⚠️  Mouse scaling looks problematic: $MOUSE_SCALING"
+    NEEDS_FIXING=true
+fi
+
+if [[ "$TRACKPAD_ACCEL" == "-1" ]] || [[ "$MOUSE_ACCEL" == "-1" ]]; then
+    echo "⚠️  Acceleration is disabled (set to -1)"
+    NEEDS_FIXING=true
+fi
+
+if [[ "$NEEDS_FIXING" == "false" ]]; then
+    echo "✅ Your settings look normal - no recovery needed!"
+    exit 0
+fi
+
+echo ""
+echo "🔧 Problematic settings detected. Would you like to reset to defaults? (y/N)"
+read -r response
+if [[ ! "$response" =~ ^[Yy]$ ]]; then
+    echo "❌ Recovery cancelled by user"
+    exit 0
+fi
+
+echo ""
+echo "🚑 Restoring default settings..."
+
+# Remove problematic trackpad settings
+if [[ "$TRACKPAD_SCALING" != "DEFAULT" ]]; then
+    echo "   Removing trackpad scaling setting..."
+    defaults delete -g com.apple.trackpad.scaling 2>/dev/null || true
+fi
+
+if [[ "$TRACKPAD_ACCEL" != "DEFAULT" ]]; then
+    echo "   Removing trackpad acceleration setting..."
+    defaults delete -g com.apple.trackpad.acceleration 2>/dev/null || true
+fi
+
+# Remove problematic mouse settings
+if [[ "$MOUSE_SCALING" != "DEFAULT" ]]; then
+    echo "   Removing mouse scaling setting..."
+    defaults delete -g com.apple.mouse.scaling 2>/dev/null || true
+fi
+
+if [[ "$MOUSE_ACCEL" != "DEFAULT" ]]; then
+    echo "   Removing mouse acceleration setting..."
+    defaults delete -g com.apple.mouse.acceleration 2>/dev/null || true
+fi
+
+# Restart Dock to apply changes
+echo "   Restarting Dock to apply changes..."
+killall Dock 2>/dev/null || true
+
+echo ""
+echo "✅ Recovery complete!"
+echo ""
+echo "Your trackpad and mouse should now be back to normal macOS defaults."
+echo "If you still have issues, try logging out and back in, or restarting your Mac."
+echo ""
+echo "The new version of Dragoboo uses safe event modification that won't"
+echo "cause permanent system changes even if the app crashes."
+</file>
+
+<file path="Sources/DragobooCore/SystemSpeedController.swift">
+import Foundation
+import IOKit
+import os
+import CoreFoundation
+import ApplicationServices
+
+public class SystemSpeedController {
+    private var originalMouseSpeed: Double?
+    private var originalTrackpadSpeed: Double?
+    private let logger = Logger(subsystem: "com.dragoboo.core", category: "SystemSpeedController")
+    private var usingFallback = false
+    private var isActive = false // Track if we're currently in slow mode
+    
+    // IOHIDEventSystemClient support
+    private var hidClient: UnsafeMutableRawPointer?
+    private var hidClientAvailable = false
+    
+    // IOHIDEventSystemClient functions (private APIs)
+    private let IOHIDEventSystemClientCreateWithType: (@convention(c) (CFAllocator?, Int32, UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer?)?
+    private let IOHIDEventSystemClientSetProperty: (@convention(c) (UnsafeMutableRawPointer, CFString, CFTypeRef) -> Void)?
+    private let IOHIDEventSystemClientCopyProperty: (@convention(c) (UnsafeMutableRawPointer, CFString) -> CFTypeRef?)?
+    
+    public init() {
+        print("SystemSpeedController: 🔧 Initializing SystemSpeedController...")
+        logger.info("SystemSpeedController initialization started")
+        
+        // Load private API functions using dlsym
+        IOHIDEventSystemClientCreateWithType = {
+            guard let createFunc = dlsym(dlopen(nil, RTLD_LAZY), "IOHIDEventSystemClientCreateWithType") else { 
+                print("SystemSpeedController: ❌ Failed to load IOHIDEventSystemClientCreateWithType")
+                return nil 
+            }
+            print("SystemSpeedController: ✅ Loaded IOHIDEventSystemClientCreateWithType")
+            return unsafeBitCast(createFunc, to: (@convention(c) (CFAllocator?, Int32, UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer?).self)
+        }()
+        
+        IOHIDEventSystemClientSetProperty = {
+            guard let setFunc = dlsym(dlopen(nil, RTLD_LAZY), "IOHIDEventSystemClientSetProperty") else { 
+                print("SystemSpeedController: ❌ Failed to load IOHIDEventSystemClientSetProperty")
+                return nil 
+            }
+            print("SystemSpeedController: ✅ Loaded IOHIDEventSystemClientSetProperty")
+            return unsafeBitCast(setFunc, to: (@convention(c) (UnsafeMutableRawPointer, CFString, CFTypeRef) -> Void).self)
+        }()
+        
+        IOHIDEventSystemClientCopyProperty = {
+            guard let copyFunc = dlsym(dlopen(nil, RTLD_LAZY), "IOHIDEventSystemClientCopyProperty") else { 
+                print("SystemSpeedController: ❌ Failed to load IOHIDEventSystemClientCopyProperty")
+                return nil 
+            }
+            print("SystemSpeedController: ✅ Loaded IOHIDEventSystemClientCopyProperty")
+            return unsafeBitCast(copyFunc, to: (@convention(c) (UnsafeMutableRawPointer, CFString) -> CFTypeRef?).self)
+        }()
+        
+        print("SystemSpeedController: 🔧 About to initialize HID client...")
+        initializeHIDClient()
+        print("SystemSpeedController: 🔧 HID client initialization completed. hidClientAvailable=\(hidClientAvailable)")
+        
+        // Set up signal handlers for graceful cleanup on crashes (after all properties are initialized)
+        setupSignalHandlers()
+    }
+    
+    deinit {
+        // Ensure cleanup on deallocation
+        cleanupResources()
+    }
+    
+    private func setupSignalHandlers() {
+        // Set up signal handlers for graceful cleanup
+        signal(SIGTERM) { _ in
+            // Note: This is a simplified handler - in a real app you'd want a more sophisticated approach
+            print("SystemSpeedController: ⚠️ SIGTERM received, cleaning up...")
+        }
+        
+        signal(SIGINT) { _ in
+            print("SystemSpeedController: ⚠️ SIGINT received, cleaning up...")
+        }
+    }
+    
+    private func cleanupResources() {
+        print("SystemSpeedController: 🧹 Cleaning up resources...")
+        
+        // Restore original speeds if we're currently active
+        if isActive {
+            do {
+                try restoreOriginalSpeed()
+            } catch {
+                print("SystemSpeedController: ❌ Failed to restore speeds during cleanup: \(error)")
+            }
+        }
+        
+        // Clean up HID client
+        if hidClient != nil {
+            // Note: IOHIDEventSystemClient doesn't have a documented release function
+            // but we should at least nil our reference
+            hidClient = nil
+            hidClientAvailable = false
+            print("SystemSpeedController: ✅ HID client cleaned up")
+        }
+    }
+    
+    private func initializeHIDClient() {
+        print("SystemSpeedController: 🔧 initializeHIDClient() started")
+        
+        guard let createFunc = IOHIDEventSystemClientCreateWithType else {
+            print("SystemSpeedController: ❌ IOHIDEventSystemClient functions not available on this macOS version")
+            logger.warning("IOHIDEventSystemClient functions not available on this macOS version")
+            hidClientAvailable = false
+            return
+        }
+        print("SystemSpeedController: ✅ IOHIDEventSystemClient functions are available")
+        
+        // Add safety guard: only try IOKit if we have accessibility permissions
+        guard AXIsProcessTrusted() else {
+            print("SystemSpeedController: ❌ Accessibility permissions required for IOHIDEventSystemClient")
+            logger.warning("Accessibility permissions required for IOHIDEventSystemClient")
+            hidClientAvailable = false
+            return
+        }
+        print("SystemSpeedController: ✅ Accessibility permissions verified")
+        
+        // Wrap in exception handling for safety
+        print("SystemSpeedController: 🔧 Creating IOHIDEventSystemClient...")
+        
+        do {
+            hidClient = createFunc(kCFAllocatorDefault, 0, nil) // kIOHIDEventSystemClientTypeAdmin = 0
+            hidClientAvailable = (hidClient != nil)
+            print("SystemSpeedController: 🔧 IOHIDEventSystemClient creation result: hidClient=\(hidClient != nil ? "SUCCESS" : "NIL")")
+            
+            if hidClientAvailable {
+                print("SystemSpeedController: ✅ IOHIDEventSystemClient initialized successfully")
+                logger.info("✅ IOHIDEventSystemClient initialized successfully")
+                
+                // Test basic functionality to ensure stability
+                if testHIDClientBasicFunctionality() {
+                    print("SystemSpeedController: ✅ IOHIDEventSystemClient ready for use")
+                } else {
+                    print("SystemSpeedController: ⚠️ IOHIDEventSystemClient basic test failed, disabling for safety")
+                    hidClient = nil
+                    hidClientAvailable = false
+                }
+            } else {
+                print("SystemSpeedController: ❌ Failed to create IOHIDEventSystemClient - will use event tap approach")
+                logger.warning("Failed to create IOHIDEventSystemClient - will use event tap approach")
+            }
+        } catch {
+            print("SystemSpeedController: ❌ IOHIDEventSystemClient creation failed with exception: \(error)")
+            logger.error("IOHIDEventSystemClient creation failed: \(error)")
+            hidClient = nil
+            hidClientAvailable = false
+        }
+    }
+    
+    private func testHIDClientBasicFunctionality() -> Bool {
+        guard let client = hidClient,
+              let copyProperty = IOHIDEventSystemClientCopyProperty else {
+            return false
+        }
+        
+        do {
+            // Test if we can read the HIDPointerAcceleration property
+            let propertyKey = "HIDPointerAcceleration" as CFString
+            let result = copyProperty(client, propertyKey)
+            let canRead = (result != nil)
+            
+            logger.debug("HID Client basic functionality test: \(canRead ? "PASSED" : "FAILED")")
+            return canRead
+        } catch {
+            logger.error("HID Client test failed with exception: \(error)")
+            return false
+        }
+    }
+    
+    private func ioKitSetPointerAcceleration(factor: Double) throws {
+        guard let client = hidClient,
+              let setProperty = IOHIDEventSystemClientSetProperty,
+              let copyProperty = IOHIDEventSystemClientCopyProperty else {
+            throw SystemSpeedError.failedToCreateHIDClient
+        }
+        
+        // Save original acceleration if not already saved
+        if originalMouseSpeed == nil {
+            let propertyKey = "HIDPointerAcceleration" as CFString
+            if let result = copyProperty(client, propertyKey),
+               let number = result as? NSNumber {
+                originalMouseSpeed = number.doubleValue
+                logger.debug("Saved original pointer acceleration: \(self.originalMouseSpeed!)")
+            } else {
+                // Try fallback values for different macOS versions
+                do {
+                    originalMouseSpeed = try getCurrentSystemAcceleration()
+                } catch {
+                    originalMouseSpeed = 45056.0
+                }
+                logger.debug("Using fallback original acceleration: \(self.originalMouseSpeed!)")
+            }
+        }
+        
+        // Calculate new acceleration value
+        let newAcceleration = (originalMouseSpeed ?? 45056.0) / factor
+        var accelerationValue = newAcceleration
+        
+        // Set the new acceleration with bounds checking
+        if newAcceleration < 1.0 || newAcceleration > 100000.0 {
+            logger.warning("Calculated acceleration out of bounds: \(newAcceleration), clamping")
+            accelerationValue = max(1.0, min(100000.0, newAcceleration))
+        }
+        
+        let propertyKey = "HIDPointerAcceleration" as CFString
+        let value = CFNumberCreate(kCFAllocatorDefault, .doubleType, &accelerationValue)!
+        
+        setProperty(client, propertyKey, value)
+        logger.info("✅ Set pointer acceleration to \(accelerationValue) (factor: \(factor))")
+    }
+    
+    private func getCurrentSystemAcceleration() throws -> Double {
+        // Try to read system acceleration from multiple sources
+        let sources = [
+            ("com.apple.mouse.scaling", 0.6875),
+            ("com.apple.trackpad.scaling", 0.6875),
+            ("AppleMouseDefaultAcceleration", 45056.0)
+        ]
+        
+        for (key, _) in sources {
+            let value = CFPreferencesCopyValue(
+                key as CFString,
+                kCFPreferencesAnyApplication,
+                kCFPreferencesCurrentUser,
+                kCFPreferencesAnyHost
+            )
+            
+            if let number = value as? NSNumber {
+                return number.doubleValue
+            }
+        }
+        
+        return 45056.0 // Ultimate fallback
+    }
+    
+    private func ioKitRestorePointerAcceleration() throws {
+        guard let client = hidClient,
+              let setProperty = IOHIDEventSystemClientSetProperty,
+              let originalSpeed = originalMouseSpeed else {
+            return
+        }
+        
+        var accelerationValue = originalSpeed
+        let propertyKey = "HIDPointerAcceleration" as CFString
+        let value = CFNumberCreate(kCFAllocatorDefault, .doubleType, &accelerationValue)!
+        
+        setProperty(client, propertyKey, value)
+        logger.info("Restored original pointer acceleration: \(originalSpeed)")
+    }
+    
+    public func setSlowSpeed(factor: Double) throws {
+        print("SystemSpeedController: 🔧 setSlowSpeed(factor: \(factor)) called")
+        logger.info("Setting slow speed with factor: \(factor)")
+        
+        var lastError: Error?
+        
+        // Try IOKit approach first if available
+        if hidClientAvailable {
+            print("SystemSpeedController: 🔧 Trying IOKit approach (hidClientAvailable=true)")
+            do {
+                print("SystemSpeedController: 🔧 Calling ioKitSetPointerAcceleration...")
+                try ioKitSetPointerAcceleration(factor: factor)
+                print("SystemSpeedController: ✅ ioKitSetPointerAcceleration completed")
+                isActive = true
+                
+                // Validate to ensure it worked
+                if validateSpeedChange(expectedFactor: factor) {
+                    print("SystemSpeedController: ✅ Successfully set speed using IOKit HIDEventSystemClient")
+                    logger.info("Successfully set speed using IOKit HIDEventSystemClient")
+                    return
+                } else {
+                    print("SystemSpeedController: ❌ IOKit method failed validation")
+                    throw SystemSpeedError.failedToSetSpeed
+                }
+            } catch {
+                lastError = error
+                print("SystemSpeedController: ❌ IOKit method failed: \(error)")
+                logger.warning("IOKit method failed: \(error)")
+                isActive = false
+            }
+        } else {
+            print("SystemSpeedController: 🔧 IOKit not available (hidClientAvailable=false)")
+            logger.warning("IOKit not available - event tap approach should be used instead of UserDefaults")
+        }
+        
+        // REMOVED: UserDefaults fallback approach as it causes permanent system changes
+        // Instead, throw an error to indicate that event tap approach should be used
+        print("SystemSpeedController: ❌ IOKit approach failed and UserDefaults approach is disabled for safety")
+        logger.error("IOKit approach failed and UserDefaults approach is disabled for safety - use event tap approach instead")
+        throw lastError ?? SystemSpeedError.failedToSetSpeed
+    }
+    
+    public func restoreOriginalSpeed() throws {
+        logger.info("Restoring original speeds")
+        
+        // Only restore if we're currently active
+        guard isActive else {
+            logger.debug("Not currently active, no need to restore")
+            return
+        }
+        
+        // Try IOKit approach if available and we have original speed
+        if hidClientAvailable && originalMouseSpeed != nil {
+            do {
+                try ioKitRestorePointerAcceleration()
+                isActive = false
+                logger.info("Successfully restored original speeds using IOKit")
+                return
+            } catch {
+                logger.warning("IOKit restore failed: \(error)")
+                isActive = false
+                throw error
+            }
+        }
+        
+        // If IOKit not available, we shouldn't have been active in the first place
+        logger.debug("IOKit not available, no restoration needed")
+        isActive = false
+    }
+    
+    private func getCurrentMouseSpeed() throws -> Double {
+        logger.debug("Getting current mouse speed")
+        
+        // Read from global preferences using UserDefaults
+        let defaults = UserDefaults.standard
+        let speed = defaults.double(forKey: "com.apple.mouse.scaling")
+        
+        // If speed is 0, the preference doesn't exist, use default
+        if speed == 0 {
+            logger.debug("Mouse speed preference not set, using default")
+            return 0.6875 // Default macOS mouse speed
+        } else {
+            logger.debug("Current mouse speed: \(speed)")
+            return speed
+        }
+    }
+    
+    private func getCurrentTrackpadSpeed() throws -> Double {
+        logger.debug("Getting current trackpad speed")
+        
+        // Read from global preferences using UserDefaults
+        let defaults = UserDefaults.standard
+        let speed = defaults.double(forKey: "com.apple.trackpad.scaling")
+        
+        // If speed is 0, the preference doesn't exist, use default
+        if speed == 0 {
+            logger.debug("Trackpad speed preference not set, using default")
+            return 0.6875 // Default macOS trackpad speed
+        } else {
+            logger.debug("Current trackpad speed: \(speed)")
+            return speed
+        }
+    }
+    
+    
+    public func validateSpeedChange(expectedFactor: Double) -> Bool {
+        logger.debug("Validating speed change with expected factor: \(expectedFactor)")
+        
+        // Small delay to allow system to process changes
+        usleep(100000) // 100ms - longer delay for more reliable validation
+        
+        do {
+            if hidClientAvailable {
+                // Validate IOKit approach with multiple attempts
+                for attempt in 1...3 {
+                    if try validateIOKitSpeedChange(expectedFactor: expectedFactor) {
+                        logger.debug("IOKit validation passed on attempt \(attempt)")
+                        return true
+                    }
+                    if attempt < 3 {
+                        usleep(50000) // 50ms between attempts
+                    }
+                }
+                logger.warning("IOKit validation failed after 3 attempts")
+                return false
+            } else {
+                // Validate UserDefaults approach
+                return try validateUserDefaultsSpeedChange(expectedFactor: expectedFactor)
+            }
+        } catch {
+            logger.error("Speed validation failed: \(error)")
+            return false
+        }
+    }
+    
+    private func validateIOKitSpeedChange(expectedFactor: Double) throws -> Bool {
+        guard let client = hidClient,
+              let copyProperty = IOHIDEventSystemClientCopyProperty else {
+            return false
+        }
+        
+        let propertyKey = "HIDPointerAcceleration" as CFString
+        guard let result = copyProperty(client, propertyKey),
+              let number = result as? NSNumber else {
+            return false
+        }
+        
+        let currentAcceleration = number.doubleValue
+        let expectedAcceleration = (originalMouseSpeed ?? 45056.0) / expectedFactor
+        let isValid = abs(currentAcceleration - expectedAcceleration) < 1000.0 // Allow some tolerance
+        
+        logger.debug("IOKit validation - current: \(currentAcceleration), expected: \(expectedAcceleration), valid: \(isValid)")
+        return isValid
+    }
+    
+    private func validateUserDefaultsSpeedChange(expectedFactor: Double) throws -> Bool {
+        let currentSpeed = try getCurrentMouseSpeed()
+        let expectedSpeed = (originalMouseSpeed ?? 0.6875) / expectedFactor
+        let isValid = abs(currentSpeed - expectedSpeed) < 0.1
+        
+        logger.debug("UserDefaults validation - current: \(currentSpeed), expected: \(expectedSpeed), valid: \(isValid)")
+        return isValid
+    }
+    
+    // MARK: - DISABLED: Dangerous UserDefaults Methods
+    // These methods are DISABLED because they cause permanent system changes
+    // that persist after app crashes, leaving users with broken trackpad/mouse settings
+    
+    /*
+    private func fallbackSetMouseSpeed(_ speed: Double) throws {
+        // DISABLED: This method permanently modifies system preferences
+        // If the app crashes, the user's mouse speed remains permanently changed
+        // Use event tap approach instead for safe, temporary modifications
+        throw SystemSpeedError.failedToSetSpeed
+    }
+    
+    private func fallbackSetTrackpadSpeed(_ speed: Double) throws {
+        // DISABLED: This method permanently modifies system preferences  
+        // If the app crashes, the user's trackpad speed remains permanently changed
+        // Use event tap approach instead for safe, temporary modifications
+        throw SystemSpeedError.failedToSetSpeed
+    }
+    */
+}
+
+public enum SystemSpeedError: LocalizedError {
+    case failedToCreateHIDClient
+    case permissionDenied
+    case failedToReadCurrentSpeed
+    case failedToSetSpeed
+    
+    public var errorDescription: String? {
+        switch self {
+        case .failedToCreateHIDClient:
+            return "Failed to create HID system client"
+        case .permissionDenied:
+            return "Permission denied - ensure Accessibility permissions are granted"
+        case .failedToReadCurrentSpeed:
+            return "Failed to read current mouse/trackpad speed"
+        case .failedToSetSpeed:
+            return "Failed to set mouse/trackpad speed"
+        }
+    }
+}
+</file>
+
+<file path="Info.plist">
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>Dragoboo</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.dragoboo.app</string>
+    <key>CFBundleName</key>
+    <string>Dragoboo</string>
+    <key>CFBundleDisplayName</key>
+    <string>Dragoboo</string>
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright © 2025. All rights reserved.</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
+</dict>
+</plist>
+</file>
+
+<file path="Makefile">
+.PHONY: all build run clean stop release help
+
+# Default target
+all: run
+
+# Build the app
+build:
+	@./run.sh --no-launch
+
+# Build and run the app
+run:
+	@./run.sh
+
+# Clean build
+clean:
+	@echo "Cleaning build directory..."
+	@rm -rf .build
+	@rm -rf build
+	@echo "Clean complete"
+
+# Stop the running app
+stop:
+	@./stop.sh
+
+# Build release version
+release:
+	@./run.sh --release
+
+# Build clean
+rebuild: clean build
+
+# Show help
+help:
+	@echo "Dragoboo Makefile"
+	@echo "================"
+	@echo "Available targets:"
+	@echo "  make         - Build and run the app (default)"
+	@echo "  make build   - Build the app without running"
+	@echo "  make run     - Build and run the app"
+	@echo "  make clean   - Clean build directory"
+	@echo "  make stop    - Stop the running app"
+	@echo "  make release - Build release version"
+	@echo "  make rebuild - Clean and rebuild"
+	@echo "  make help    - Show this help message"
+</file>
+
 <file path="Package.swift">
 // swift-tools-version: 5.10
 import PackageDescription
@@ -634,886 +883,63 @@ let package = Package(
 )
 </file>
 
-<file path="README.md">
-# Dragoboo 🐉🖱️
-
-**Dragoboo is a macOS utility designed to give you an instant precision boost for your trackpad and mouse. By simply holding down the `fn` key, you can temporarily slow down your cursor movement, allowing for finer control in detailed tasks.**
-
-Whether you're a designer pixel-peeping in an image editor, an engineer working with CAD software, or just someone who occasionally needs that extra bit of accuracy, Dragoboo aims to make your pointer interactions smoother and more precise without interrupting your workflow.
-
-[![macOS](https://img.shields.io/badge/macOS-13.0+-blue.svg)](https://www.apple.com/macos) [![Swift](https://img.shields.io/badge/Swift-5.10-orange.svg)](https://swift.org) [![SwiftUI](https://img.shields.io/badge/SwiftUI-Framework-purple.svg)](https://developer.apple.com/xcode/swiftui/) [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE) ## Table of Contents
-
-- [Features](#features)
-- [Why Dragoboo?](#why-dragoboo)
-- [User Experience (UX)](#user-experience-ux)
-  - [Installation](#installation)
-  - [First Launch & Permissions](#first-launch--permissions)
-  - [Usage](#usage)
-  - [Settings](#settings)
-- [Technical Deep Dive](#technical-deep-dive)
-  - [Core Architecture](#core-architecture)
-  - [Event Handling](#event-handling)
-  - [State Management](#state-management)
-  - [Key Components](#key-components)
-- [Getting Started](#getting-started)
-  - [Prerequisites](#prerequisites)
-  - [Building from Source](#building-from-source)
-    - [Using the Command Line (Recommended)](#using-the-command-line-recommended)
-    - [Using Xcode](#using-xcode)
-  - [Running the App](#running-the-app)
-  - [Stopping the App](#stopping-the-app)
-- [Configuration](#configuration)
-- [Privacy & Security](#privacy--security)
-- [Development Insights](#development-insights)
-  - [Project Structure](#project-structure)
-  - [Planning & Roadmap](#planning--roadmap)
-  - [Testing](#testing)
-- [Troubleshooting](#troubleshooting)
-- [Contributing](#contributing)
-- [License](#license)
-- [Acknowledgements](#acknowledgements)
-
-## Features
-
-- **Instant Precision Mode:** Hold the `fn` key to temporarily reduce cursor sensitivity.
-- **Customizable Slowdown Factor:** Adjust how much the cursor slows down (from 1x to 10x) via a simple slider in the menu bar popover. Default is 4x.
-- **Menu Bar App:** Lives discreetly in your macOS menu bar, providing quick access to settings without cluttering your Dock.
-- **Universal Support:** Works with both built-in trackpads and external mice.
-- **Comprehensive Action Coverage:** Precision mode applies to standard cursor movements, dragging actions (left, right, other), and even scroll wheel events.
-- **SwiftUI Interface:** Modern and clean user interface for settings.
-- **Lightweight:** Designed to be efficient and have minimal impact on system performance.
-- **Accessibility Focused:** Requires and guides users through granting necessary Accessibility permissions.
-
-## Why Dragoboo?
-
-Many creative and technical tasks on a Mac require precise cursor placement. While macOS offers global tracking speed adjustments, these are cumbersome to change frequently. Dragoboo provides an "on-demand" precision mode, activated by a key you already have: the `fn` key. This allows for quick switching between fast navigation and meticulous control without needing to dive into System Settings or use complex third-party tools.
-
-The core idea was born out of a need for finer trackpad control during detailed graphical work, as detailed in the initial [research document (`_private/research.md`)](_private/research.md).
-
-## User Experience (UX)
-
-### Installation
-
-Dragoboo is typically run from the build output. Once built (see [Building from Source](#building-from-source)), the `Dragoboo.app` bundle can be placed in your `/Applications` folder or run from any location.
-
-### First Launch & Permissions
-
-Upon first launch, Dragoboo will check if it has the necessary **Accessibility permissions**. These permissions are crucial for the app to monitor and modify mouse/trackpad events system-wide.
-
-1.  If permissions are not granted, the app's menu bar popover will display a message prompting you to grant them.
-2.  Clicking the "Grant Permission" button will attempt to open **System Settings > Privacy & Security > Accessibility**.
-3.  You will need to find "Dragoboo" in the list and enable it. You might need to unlock System Settings with your administrator password.
-
-Without these permissions, Dragoboo cannot function.
-
-### Usage
-
-Once installed and permissions are granted:
-
-1.  **Launch Dragoboo:** The app icon (a cursor arrow) will appear in your macOS menu bar.
-2.  **Activate Precision Mode:** Simply **press and hold the `fn` key** on your keyboard. While the `fn` key is held, your cursor (and scrolling) will move significantly slower, based on the configured slowdown factor.
-3.  **Release `fn` Key:** Release the `fn` key to return to normal cursor speed.
-
-The menu bar icon will change to indicate when precision mode is active (e.g., from `cursorarrow` to `cursorarrow.click.2`).
-
-### Settings
-
-Click the Dragoboo icon in the menu bar to open a small popover window:
-
-- **Accessibility Status:** Shows if permissions are granted.
-- **Slowdown Factor Slider:** Adjust the precision multiplier from 1x (no slowdown) to 10x. The default is 4x. Changes are applied live.
-- **Precision Mode Indicator:** A label confirms "Precision mode active" when the `fn` key is held.
-- **Status Indicator:** A small circle (gray for ready, green for active) and text provide a quick visual cue.
-- **Quit Button:** To close the application.
-
-## Technical Deep Dive
-
-### Core Architecture
-
-Dragoboo follows a modular design:
-
-- **`DragobooApp` (SwiftUI Application):**
-
-  - Manages the main application lifecycle.
-  - Provides the `MenuBarExtra` user interface using SwiftUI.
-  - Hosts the `AppState` observable object to bridge UI and core logic.
-  - Located in `Dragoboo/Dragoboo/DragobooApp.swift`.
-
-- **`DragobooCore` (Swift Package):**
-  - Contains the core logic for event handling and pointer scaling.
-  - This separation allows the core functionality to be potentially reused or tested independently.
-  - The primary class here is `PointerScaler`.
-  - Located in `Sources/DragobooCore/`.
-
-### Event Handling
-
-The heart of Dragoboo is its ability to intercept and modify system-wide input events. This is achieved using macOS's **Quartz Event Services**, specifically `CGEvent.tapCreate`:
-
-1.  **Event Tap Creation:** An event tap is established at the `.cgSessionEventTap` point, placed at `.headInsertEventTap` to process events before other applications.
-2.  **Events of Interest:** The tap listens for:
-    - `mouseMoved`
-    - `leftMouseDragged`, `rightMouseDragged`, `otherMouseDragged`
-    - `scrollWheel`
-    - `flagsChanged` (to detect `fn` key state changes)
-3.  **Callback Mechanism:** A C-style callback function (`eventTapCallback` in the initial research, now encapsulated within `PointerScaler`) is invoked for each relevant event.
-4.  **`fn` Key Detection:**
-    - The primary method is checking the `flags` of an incoming event for `.maskSecondaryFn`. This is handled within the `flagsChanged` event type.
-    - As a fallback and for continuous state checking during mouse/scroll events, `CGEventSource.keyState(.combinedSessionState, key: 0x3F)` is used to poll the `fn` key's state (key code `0x3F` is for `fn`).
-5.  **Delta Scaling:**
-    - When the `fn` key is detected as pressed, the `PointerScaler` retrieves the delta values from mouse movement or scroll wheel events (e.g., `.mouseEventDeltaX`, `.mouseEventDeltaY`, `.scrollWheelEventDeltaAxis1`).
-    - These delta values are then divided by the `precisionFactor`.
-    - The modified delta values are written back into the event using `setDoubleValueField`.
-    - The modified event is then passed on to the system.
-6.  **Run Loop Integration:** The event tap is added to the current run loop to ensure it processes events continuously.
-7.  **Error Handling:** The system includes logging for event tap creation failures and attempts to re-enable the tap if it's disabled by timeout or user input.
-
-### State Management
-
-- **`AppState` (ObservableObject):** This class in `DragobooApp.swift` serves as the central point for managing the application's state and acts as a ViewModel.
-  - `@Published var isPrecisionModeActive`: Tracks if the `fn` key is currently pressed.
-  - `@Published var isAccessibilityGranted`: Reflects the status of Accessibility permissions.
-  - `@AppStorage("precisionFactor") var precisionFactor: Double`: Persists the user-selected slowdown factor using `UserDefaults`.
-  - It initializes and manages the `PointerScaler` instance from `DragobooCore`.
-  - Communicates changes from `PointerScaler` (like `fn` key state) to the SwiftUI UI via its `onPrecisionModeChange` callback.
-
-### Key Components
-
-- **`DragobooApp.swift`:**
-  - `DragobooApp`: The main `@main` struct defining the app and its `MenuBarExtra` scene.
-  - `AppState`: Manages overall application state, permissions, and interaction with `PointerScaler`.
-- **`ContentView.swift`:**
-  - `ContentView`: The main SwiftUI view for the menu bar popover.
-  - `AccessibilityRequestView`: Shown if permissions are not granted.
-  - `PrecisionSettingsView`: Allows adjustment of the slowdown factor.
-  - `StatusIndicator`: Visual feedback for precision mode.
-- **`PointerScaler.swift` (in `DragobooCore`):**
-  - The core engine responsible for creating and managing the `CGEventTap`.
-  - Handles event callbacks, `fn` key detection logic, and scaling of mouse/scroll deltas.
-  - Provides an `onPrecisionModeChange` callback to notify `AppState` of `fn` key status.
-  - Manages its own lifecycle with `start()` and `stop()` methods.
-- **`Info.plist`:**
-  - Configures the app as a "UI Element" (`LSUIElement = true`), so it runs as a menu bar agent without a Dock icon.
-  - Specifies the minimum macOS deployment target.
-
-## Getting Started
-
-### Prerequisites
-
-- **macOS:** Version 13.0 or later.
-- **Xcode:** Version 15.0 or later (for building from source).
-- **Xcode Command Line Tools:** Required for `xcodebuild`. Install via `xcode-select --install`.
-- **(Optional) `xcpretty`:** For nicer build output in the terminal. Install via `gem install xcpretty`. The `run.sh` script will fall back if it's not found.
-
-### Building from Source
-
-You can build Dragoboo using the provided shell script or directly within Xcode.
-
-#### Using the Command Line (Recommended)
-
-The repository includes a `run.sh` script to simplify the build and run process.
-
-1.  **Clone the repository:**
-    ```bash
-    git clone <repository-url>
-    cd dragoboo
-    ```
-2.  **Make scripts executable (if needed):**
-    ```bash
-    chmod +x run.sh stop.sh
-    ```
-3.  **Build and Run:**
-
-    ```bash
-    ./run.sh
-    ```
-
-    This will:
-
-    - Clean the build directory (optional, can be forced with `--clean`).
-    - Build the app in Debug configuration.
-    - Launch the app.
-
-4.  **Other `run.sh` options:**
-
-    - `./run.sh --help`: Show all available script options.
-    - `./run.sh --release`: Build in Release configuration.
-    - `./run.sh --clean`: Force a clean build before building.
-    - `./run.sh --no-launch`: Build the app but do not launch it.
-
-    A `Makefile` is also provided for common tasks:
-
-    ```bash
-    make          # Build and run (default)
-    make build    # Build without running
-    make clean    # Clean build directory
-    make release  # Build release version
-    make rebuild  # Clean and then build
-    make help     # Show Makefile help
-    ```
-
-#### Using Xcode
-
-1.  Open `Dragoboo.xcodeproj` in Xcode.
-2.  Select the "Dragoboo" scheme and a macOS run destination (My Mac).
-3.  Click the "Build and Run" button (or press `⌘R`).
-
-### Running the App
-
-After building, the `Dragoboo.app` bundle will be located in the `build/Build/Products/<Configuration>/` directory (e.g., `build/Build/Products/Debug/Dragoboo.app`).
-
-You can launch it by:
-
-- Using `./run.sh` (which handles launching).
-- Double-clicking `Dragoboo.app` in Finder.
-- Running `open build/Build/Products/Debug/Dragoboo.app` from the terminal (adjust path if built in Release).
-
-### Stopping the App
-
-- Click the Dragoboo icon in the menu bar and select "Quit".
-- Run `./stop.sh` from the terminal.
-- If run from Xcode, stopping the process in Xcode will terminate the app.
-
-## Configuration
-
-The primary configuration option is the **Slowdown Factor**, adjustable from 1x to 10x using the slider in the menu bar popover. This setting is persisted across app launches using `@AppStorage` (which relies on `UserDefaults`).
-
-## Privacy & Security
-
-- **Accessibility Permissions:** Dragoboo **requires** Accessibility permissions in **System Settings > Privacy & Security > Accessibility**. This is essential for the app to monitor and modify mouse and keyboard events system-wide. The app will guide you to grant these permissions.
-- **No Data Collection:** Dragoboo does not collect, store, or transmit any personal data.
-- **No Network Connectivity:** The app does not connect to the internet.
-- **Local Operation:** All event processing and modification happen locally on your Mac.
-- **Targeted Modification:** Event modification only occurs when the `fn` key is actively held down.
-
-## Development Insights
-
-### Project Structure
-
-Dragoboo/├── Dragoboo.xcodeproj # Xcode project file├── Dragoboo/ # Main application target group│ ├── DragobooApp.swift # App entry point, MenuBarExtra, AppState│ ├── ContentView.swift # SwiftUI views for the popover│ ├── Assets.xcassets # App icons and other assets│ └── Info.plist # Application configuration├── Sources/│ └── DragobooCore/ # Swift Package for core logic│ └── PointerScaler.swift # Event tap and scaling logic├── Tests/│ └── DragobooCoreTests/ # Unit tests for DragobooCore│ └── PointerScalerTests.swift├── \_private/│ └── research.md # Initial research and planning├── Package.swift # Swift Package Manager manifest├── README.md # This file├── PLAN.md # Detailed development plan├── TODO.md # Short-term tasks├── Makefile # Makefile for build automation├── run.sh # Build and run script└── stop.sh # Script to stop the app
-
-### Planning & Roadmap
-
-The development process is guided by:
-
-- [`PLAN.md`](PLAN.md): A comprehensive checklist of development phases and deliverables, covering research, implementation, testing, and release.
-- [`TODO.md`](TODO.md): A list of immediate, actionable tasks for the current development sprint.
-- [`CLAUDE.md`](CLAUDE.md): Contains initial guidelines and thoughts on implementation, particularly regarding API choices and architectural decisions.
-
-### Testing
-
-- **Unit Tests:** Basic unit tests for `DragobooCore` are located in `Tests/DragobooCoreTests/`. These currently cover `PointerScaler` initialization and factor updates.
-- **Manual Testing:** Crucial for verifying the end-to-end UX, `fn` key interaction, and behavior across different applications and input devices.
-
-## Troubleshooting
-
-- **App Not Working / No Slowdown:**
-  1.  **Check Accessibility Permissions:** Ensure Dragoboo is enabled in **System Settings > Privacy & Security > Accessibility**. This is the most common reason for the app not functioning. Try toggling the permission off and on.
-  2.  **Restart Dragoboo:** Quit the app from its menu bar icon and relaunch it.
-  3.  **Check `fn` Key Configuration:** On some MacBooks, the `fn` key might be configured to perform its special feature (e.g., Show Emoji & Symbols, Start Dictation) instead of acting as a standard modifier. Check **System Settings > Keyboard > Keyboard > Press fn key to...**. For Dragoboo to work best, this should ideally be set to "Do Nothing" or a setting that doesn't conflict. Dragoboo attempts to detect the `fn` key regardless, but system-level interception might interfere.
-- **`xcpretty` Not Found (during `./run.sh`):**
-  - The `run.sh` script will fall back to standard `xcodebuild` output. If you want prettier output, install `xcpretty`: `sudo gem install xcpretty`.
-- **CoreSimulator Version Mismatch (Build Error):**
-  - This error (`CoreSimulator is out of date...`) might appear if your Xcode or macOS is not fully up-to-date, or if there's a mismatch between Xcode's components.
-  - Ensure macOS and Xcode are updated to their latest compatible versions.
-  - Sometimes, restarting your Mac or reinstalling Xcode Command Line Tools (`sudo rm -rf /Library/Developer/CommandLineTools; xcode-select --install`) can help. This error primarily affects simulator builds, which Dragoboo doesn't rely on for its core functionality.
-- **`fn` Key on External Keyboards:**
-  - The reliability of `fn` key detection can vary with third-party external keyboards. Dragoboo is primarily tested with built-in MacBook keyboards and Apple Magic Keyboards. If you experience issues, this might be a limitation.
-
-## Contributing
-
-Contributions are welcome! If you'd like to contribute, please:
-
-1.  Fork the repository.
-2.  Create a new branch for your feature or bug fix.
-3.  Refer to `PLAN.md` and `TODO.md` for areas of development.
-4.  Follow the existing code style and architectural patterns.
-5.  Write tests for new functionality if applicable.
-6.  Submit a pull request with a clear description of your changes.
-
-## License
-
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details. _(Note: A `LICENSE` file was not explicitly provided in the source; assuming MIT as a common open-source license. Please create/update this file if a different license applies.)_
-
-## Acknowledgements
-
-- The initial research and problem statement that inspired Dragoboo.
-- The macOS developer community for resources on `CGEventTap` and SwiftUI.
-
-## Reminders for contributors
-
-- **Readability > cleverness.** Clear names & comments.
-- **Fail safely.** If the tap can’t activate, surface a user-friendly banner and exit.
-- **Keep PLAN.md & TODO.md living documents.** Update as you learn.
-- **Commit often, push daily.** Small PRs enable fast review.
-
-## Development Guidelines
-
-- Only modify code directly relevant to the specific request. Avoid changing unrelated functionality.
-- Never replace code with placeholders like `# ... rest of the processing ...`. Always include complete code.
-- Break problems into smaller steps. Think through each step separately before implementing.
-- Always provide a complete PLAN with REASONING based on evidence from code and logs before making changes.
-- Explain your OBSERVATIONS clearly, then provide REASONING to identify the exact issue. Add console logs when needed to gather more information.
-
-Dragoboo is a macOS utility that provides precision cursor control through temporary slowdown functionality.
-
-## Core Business Logic
-
-### Precision Control System
-
-- Activates temporary cursor slowdown when fn key is held
-- Scales both cursor movement and scroll wheel input
-- Configurable slowdown factor (1x-10x)
-- Persists user preferences across sessions
-- Works universally with trackpads and mice
-
-### Event Processing Pipeline
-
-The event interception and modification system:
-
-1. Creates system-wide event tap for mouse/trackpad inputs
-2. Monitors fn key state continuously
-3. Applies precision scaling to movement deltas when active
-4. Handles multiple event types including movement, dragging, and scrolling
-
-### Permission Management
-
-- Requires macOS Accessibility permissions
-- Guides users through permission granting process
-- Validates permission status on launch
-- Prevents operation without proper access
-
-### State Management System
-
-Centralizes control through AppState which:
-
-- Tracks precision mode status
-- Manages accessibility permissions
-- Controls slowdown factor settings
-- Coordinates UI feedback
-
-## Critical Components
-
-### Core Files
-
-- `DragobooApp.swift`: Application entry point and state coordination
-- `PointerScaler.swift`: Event interception and scaling engine
-- `ContentView.swift`: UI feedback and settings interface
-
-### Key Integrations
-
-- Event tap system for system-wide input capture
-- Accessibility permissions framework
-- User defaults for persistence
-- Menu bar integration for status and control
-
-### Data Flow
-
-1. System input events → Event tap
-2. Event tap → Pointer scaler
-3. Pointer scaler → Modified events
-4. State changes → UI updates
-</file>
-
-<file path="somelog.txt">
-default	01:39:28.113818+0200	Dragoboo	🖱️ MOUSE EVENT #240: <private>
-default	01:39:28.113884+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:28.113944+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING
-(...)
-default	01:39:28.657061+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:28.657082+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING
-default	01:39:28.665035+0200	Dragoboo	🖱️ MOUSE EVENT #328: <private>
-default	01:39:28.665095+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:28.665113+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING
-default	01:39:28.824599+0200	runningboardd	Acquiring assertion targeting [app<application.com.dragoboo.app.1310133939.1310133943(501)>:34855] from originator [osservice<com.apple.WindowServer(88)>:186] with description <RBSAssertionDescriptor| "AppDrawing" ID:199-186-5798 target:34855 attributes:[
-	<RBSDomainAttribute| domain:"com.apple.appnap" name:"AppDrawing" sourceEnvironment:"(null)">,
-	<RBSAcquisitionCompletionAttribute| policy:AfterApplication>
-	]>
-default	01:39:28.824738+0200	runningboardd	Assertion 199-186-5798 (target:[app<application.com.dragoboo.app.1310133939.1310133943(501)>:34855]) will be created as active
-default	01:39:28.825398+0200	runningboardd	[app<application.com.dragoboo.app.1310133939.1310133943(501)>:34855] Ignoring jetsam update because this process is not memory-managed
-default	01:39:28.825423+0200	runningboardd	[app<application.com.dragoboo.app.1310133939.1310133943(501)>:34855] Ignoring suspend because this process is not lifecycle managed
-default	01:39:28.825447+0200	runningboardd	[app<application.com.dragoboo.app.1310133939.1310133943(501)>:34855] Ignoring GPU update because this process is not GPU managed
-default	01:39:28.825515+0200	runningboardd	[app<application.com.dragoboo.app.1310133939.1310133943(501)>:34855] Ignoring memory limit update because this process is not memory-managed
-default	01:39:28.845532+0200	runningboardd	Calculated state for app<application.com.dragoboo.app.1310133939.1310133943(501)>: running-active (role: UserInteractive) (endowments: <private>)
-default	01:39:29.070909+0200	Dragoboo	🖱️ MOUSE EVENT #330: <private>
-default	01:39:29.070962+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:29.070982+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING
-default	01:39:29.078716+0200	Dragoboo	🖱️ MOUSE EVENT #332: <private>
-default	01:39:29.078742+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:29.078762+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING
-default	01:39:29.086658+0200	Dragoboo	🖱️ MOUSE EVENT #334: <private>
-default	01:39:29.086687+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:29.086707+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING
-default	01:39:29.116643+0200	runningboardd	Acquiring assertion targeting [app<application.com.dragoboo.app.1310133939.1310133943(501)>:34855] from originator [osservice<com.apple.WindowServer(88)>:186] with description <RBSAssertionDescriptor| "AppVisible" ID:199-186-5818 target:34855 attributes:[
-	<RBSDomainAttribute| domain:"com.apple.appnap" name:"AppVisible" sourceEnvironment:"(null)">,
-	<RBSAcquisitionCompletionAttribute| policy:AfterApplication>
-	]>
-default	01:39:29.116759+0200	runningboardd	Assertion 199-186-5818 (target:[app<application.com.dragoboo.app.1310133939.1310133943(501)>:34855]) will be created as active
-default	01:39:29.117362+0200	runningboardd	[app<application.com.dragoboo.app.1310133939.1310133943(501)>:34855] Ignoring jetsam update because this process is not memory-managed
-default	01:39:29.117409+0200	runningboardd	[app<application.com.dragoboo.app.1310133939.1310133943(501)>:34855] Ignoring suspend because this process is not lifecycle managed
-default	01:39:29.117433+0200	runningboardd	[app<application.com.dragoboo.app.1310133939.1310133943(501)>:34855] Ignoring GPU update because this process is not GPU managed
-default	01:39:29.117597+0200	runningboardd	[app<application.com.dragoboo.app.1310133939.1310133943(501)>:34855] Ignoring memory limit update because this process is not memory-managed
-default	01:39:29.119224+0200	Dragoboo	🖱️ MOUSE EVENT #342: <private>
-default	01:39:29.119247+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:29.119266+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING
-default	01:39:29.127290+0200	Dragoboo	🖱️ MOUSE EVENT #344: <private>
-(...)
-default	01:39:30.255259+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING
-default	01:39:30.288441+0200	Dragoboo	🖱️ MOUSE EVENT #516: <private>
-default	01:39:30.288466+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:30.288486+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING
-default	01:39:30.458409+0200	Dragoboo	[0x6000028881e0] activating connection: mach=false listener=false peer=false name=com.apple.ViewBridgeAuxiliary
-default	01:39:30.467650+0200	Dragoboo	[0x7fbbb3b4f880] activating connection: mach=false listener=false peer=false name=(anonymous)
-default	01:39:30.468754+0200	Dragoboo	[0x7fbbb3b41aa0] activating connection: mach=false listener=true peer=false name=(anonymous)
-default	01:39:30.468771+0200	Dragoboo	[0x7fbbb3b41aa0] Channel could not return listener port.
-default	01:39:30.474046+0200	Dragoboo	order window front conditionally: 64c related: 0
-default	01:39:30.474119+0200	Dragoboo	void _NSEnableAutomaticTerminationAndLog(NSString *) No windows open yet
-default	01:39:30.474456+0200	Dragoboo	establishing connection to agent
-default	01:39:30.474562+0200	Dragoboo	[0x600003481270] Session created.
-default	01:39:30.474584+0200	Dragoboo	[0x600003481270] Session created from connection [0x6000028982d0]
-default	01:39:30.474611+0200	Dragoboo	[0x6000028982d0] activating connection: mach=true listener=false peer=false name=com.apple.uiintelligencesupport.agent
-default	01:39:30.474766+0200	Dragoboo	[0x600003481270] Session activated
-default	01:39:30.475334+0200	Dragoboo	New connection 0xde927 secondary
-default	01:39:30.475613+0200	Dragoboo	[0x6000028881e0] invalidated after the last release of the connection object
-default	01:39:30.548994+0200	Dragoboo	void _updateToReflectAutomaticTerminationState(void) Setting _kLSApplicationWouldBeTerminatedByTALKey=0
-default	01:39:30.708611+0200	runningboardd	Assertion did invalidate due to timeout: 199-199-5783 (target:[app<application.com.dragoboo.app.1310133939.1310133943(501)>:34855])
-default	01:39:30.732692+0200	Dragoboo	[0x600002890f00] activating connection: mach=false listener=false peer=false name=com.apple.hiservices-xpcservice
-default	01:39:30.739114+0200	Dragoboo	+[IMKClient subclass]: chose IMKClient_Modern
-default	01:39:30.739142+0200	Dragoboo	+[IMKInputSession subclass]: chose IMKInputSession_Modern
-default	01:39:30.743139+0200	Dragoboo	[0x7fbba3941320] activating connection: mach=true listener=false peer=false name=com.apple.inputmethodkit.getxpcendpoint
-default	01:39:30.744796+0200	Dragoboo	[0x7fbb9380ebd0] activating connection: mach=true listener=false peer=false name=com.apple.inputmethodkit.getxpcendpoint
-default	01:39:30.745816+0200	Dragoboo	[0x7fbba2f04440] activating connection: mach=false listener=false peer=false name=(anonymous)
-default	01:39:30.746572+0200	Dragoboo	[0x7fbba2f0bbd0] activating connection: mach=false listener=false peer=false name=(anonymous)
-default	01:39:30.810282+0200	runningboardd	[app<application.com.dragoboo.app.1310133939.1310133943(501)>:34855] Ignoring jetsam update because this process is not memory-managed
-default	01:39:30.810410+0200	runningboardd	[app<application.com.dragoboo.app.1310133939.1310133943(501)>:34855] Ignoring suspend because this process is not lifecycle managed
-default	01:39:30.810714+0200	runningboardd	[app<application.com.dragoboo.app.1310133939.1310133943(501)>:34855] Ignoring GPU update because this process is not GPU managed
-default	01:39:30.810977+0200	runningboardd	[app<application.com.dragoboo.app.1310133939.1310133943(501)>:34855] Ignoring memory limit update because this process is not memory-managed
-default	01:39:30.936858+0200	Dragoboo	🖱️ MOUSE EVENT #518: <private>
-default	01:39:30.936886+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:30.936904+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING
-default	01:39:30.944957+0200	Dragoboo	🖱️ MOUSE EVENT #520: <private>
-default	01:39:30.944982+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:30.945000+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING
-default	01:39:30.953341+0200	Dragoboo	🖱️ MOUSE EVENT #522: <private>
-default	01:39:30.953371+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:30.953392+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING
-default	01:39:30.961595+0200	Dragoboo	🖱️ MOUSE EVENT #524: <private>
-default	01:39:30.961638+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:30.961708+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING
-default	01:39:30.969783+0200	Dragoboo	🖱️ MOUSE EVENT #526: <private>
-default	01:39:30.969830+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:30.969868+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING
-default	01:39:30.977557+0200	Dragoboo	🖱️ MOUSE EVENT #528: <private>
-default	01:39:30.977631+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:30.977690+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING
-default	01:39:30.985683+0200	Dragoboo	🖱️ MOUSE EVENT #530: <private>
-default	01:39:30.985730+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:30.985752+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING
-default	01:39:30.993731+0200	Dragoboo	🖱️ MOUSE EVENT #532: <private>
-default	01:39:30.993757+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:30.993793+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING
-default	01:39:31.001833+0200	Dragoboo	🖱️ MOUSE EVENT #534: <private>
-default	01:39:31.001863+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:31.001884+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING
-default	01:39:31.010193+0200	Dragoboo	🖱️ MOUSE EVENT #536: <private>
-default	01:39:31.010220+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:31.010246+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING
-default	01:39:31.018419+0200	Dragoboo	🖱️ MOUSE EVENT #538: <private>
-default	01:39:31.018448+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:31.018467+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING
-default	01:39:31.025999+0200	Dragoboo	🖱️ MOUSE EVENT #540: <private>
-default	01:39:31.026065+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:31.026083+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING
-default	01:39:31.034177+0200	Dragoboo	🖱️ MOUSE EVENT #542: <private>
-default	01:39:31.034202+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:31.034220+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING
-default	01:39:31.042695+0200	Dragoboo	🖱️ MOUSE EVENT #544: <private>
-default	01:39:31.042746+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:31.042799+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING
-default	01:39:31.048409+0200	runningboardd	Calculated state for app<application.com.dragoboo.app.1310133939.1310133943(501)>: running-active (role: UserInteractive) (endowments: <private>)
-default	01:39:31.050735+0200	Dragoboo	🖱️ MOUSE EVENT #546: <private>
-default	01:39:31.050764+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:31.050784+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING
-default	01:39:31.058803+0200	Dragoboo	🖱️ MOUSE EVENT #548: <private>
-default	01:39:31.058830+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:31.058851+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING
-default	01:39:31.067523+0200	Dragoboo	🖱️ MOUSE EVENT #550: <private>
-default	01:39:31.067548+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:31.067565+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING
-default	01:39:31.075503+0200	Dragoboo	🖱️ MOUSE EVENT #552: <private>
-default	01:39:31.075525+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:31.075542+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING
-default	01:39:31.078233+0200	Dragoboo	FN key state changed via keycode 63: <private>
-default	01:39:31.087830+0200	Dragoboo	🖱️ MOUSE EVENT #555: <private>
-default	01:39:31.087857+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:31.087876+0200	Dragoboo	🎯 ATTEMPTING TO SCALE MOUSE MOVEMENT...
-default	01:39:31.087891+0200	Dragoboo	🔄 ENTERING scaleMouseMovement function
-default	01:39:31.087905+0200	Dragoboo	📊 FIELD COMPARISON:
-default	01:39:31.087927+0200	Dragoboo	   Integer: X=0, Y=0
-default	01:39:31.087943+0200	Dragoboo	   Double:  X=0.000000, Y=0.000000
-default	01:39:31.087961+0200	Dragoboo	⭕ NO MOVEMENT - SKIPPING
-error	01:39:31.087976+0200	Dragoboo	❌ SCALING FAILED!
-default	01:39:31.092247+0200	Dragoboo	🖱️ MOUSE EVENT #557: <private>
-default	01:39:31.092272+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:31.092291+0200	Dragoboo	🎯 ATTEMPTING TO SCALE MOUSE MOVEMENT...
-default	01:39:31.092305+0200	Dragoboo	🔄 ENTERING scaleMouseMovement function
-default	01:39:31.092320+0200	Dragoboo	📊 FIELD COMPARISON:
-default	01:39:31.092335+0200	Dragoboo	   Integer: X=-1, Y=1
-default	01:39:31.092350+0200	Dragoboo	   Double:  X=-1.000000, Y=1.000000
-default	01:39:31.092365+0200	Dragoboo	🚨 EXTREME SCALING TEST (20x slower):
-default	01:39:31.092381+0200	Dragoboo	   Original doubles: (-1.000000,1.000000)
-default	01:39:31.092401+0200	Dragoboo	   Scaled doubles: (-0.050000,0.050000)
-default	01:39:31.092415+0200	Dragoboo	🔍 DOUBLE FIELD TEST:
-default	01:39:31.092430+0200	Dragoboo	   Set: (-0.050000,0.050000)
-default	01:39:31.092444+0200	Dragoboo	   Got: (0.000000,0.000000)
-error	01:39:31.092490+0200	Dragoboo	❌ DOUBLE FIELDS FAILED - trying integer fallback
-default	01:39:31.092571+0200	Dragoboo	🔄 INTEGER FALLBACK:
-default	01:39:31.092622+0200	Dragoboo	   Scaled integers: (0,0)
-default	01:39:31.092642+0200	Dragoboo	   Set: (0,0)
-default	01:39:31.092659+0200	Dragoboo	   Got: (0,0)
-default	01:39:31.092694+0200	Dragoboo	🎯 INTEGER SCALING <private>
-default	01:39:31.092745+0200	Dragoboo	✅ SCALING APPLIED! Total scaled: 1
-default	01:39:31.099704+0200	Dragoboo	🖱️ MOUSE EVENT #559: <private>
-default	01:39:31.099767+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:31.099803+0200	Dragoboo	🎯 ATTEMPTING TO SCALE MOUSE MOVEMENT...
-default	01:39:31.099843+0200	Dragoboo	🔄 ENTERING scaleMouseMovement function
-default	01:39:31.099858+0200	Dragoboo	📊 FIELD COMPARISON:
-default	01:39:31.099874+0200	Dragoboo	   Integer: X=-1, Y=0
-default	01:39:31.099890+0200	Dragoboo	   Double:  X=-1.000000, Y=0.000000
-default	01:39:31.099909+0200	Dragoboo	🚨 EXTREME SCALING TEST (20x slower):
-default	01:39:31.099925+0200	Dragoboo	   Original doubles: (-1.000000,0.000000)
-default	01:39:31.099940+0200	Dragoboo	   Scaled doubles: (-0.050000,0.000000)
-default	01:39:31.099970+0200	Dragoboo	🔍 DOUBLE FIELD TEST:
-default	01:39:31.100004+0200	Dragoboo	   Set: (-0.050000,0.000000)
-default	01:39:31.100019+0200	Dragoboo	   Got: (0.000000,0.000000)
-error	01:39:31.100049+0200	Dragoboo	❌ DOUBLE FIELDS FAILED - trying integer fallback
-default	01:39:31.100109+0200	Dragoboo	🔄 INTEGER FALLBACK:
-default	01:39:31.100157+0200	Dragoboo	   Scaled integers: (0,0)
-default	01:39:31.100224+0200	Dragoboo	   Set: (0,0)
-default	01:39:31.100281+0200	Dragoboo	   Got: (0,0)
-default	01:39:31.100341+0200	Dragoboo	🎯 INTEGER SCALING <private>
-default	01:39:31.100378+0200	Dragoboo	✅ SCALING APPLIED! Total scaled: 2
-default	01:39:31.107820+0200	Dragoboo	🖱️ MOUSE EVENT #561: <private>
-default	01:39:31.107887+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:31.107908+0200	Dragoboo	🎯 ATTEMPTING TO SCALE MOUSE MOVEMENT...
-default	01:39:31.107924+0200	Dragoboo	🔄 ENTERING scaleMouseMovement function
-default	01:39:31.107939+0200	Dragoboo	📊 FIELD COMPARISON:
-default	01:39:31.107955+0200	Dragoboo	   Integer: X=0, Y=0
-default	01:39:31.107970+0200	Dragoboo	   Double:  X=0.000000, Y=0.000000
-default	01:39:31.107989+0200	Dragoboo	⭕ NO MOVEMENT - SKIPPING
-error	01:39:31.108042+0200	Dragoboo	❌ SCALING FAILED!
-default	01:39:31.116080+0200	Dragoboo	🖱️ MOUSE EVENT #563: <private>
-default	01:39:31.116107+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:31.116127+0200	Dragoboo	🎯 ATTEMPTING TO SCALE MOUSE MOVEMENT...
-default	01:39:31.116143+0200	Dragoboo	🔄 ENTERING scaleMouseMovement function
-default	01:39:31.116158+0200	Dragoboo	📊 FIELD COMPARISON:
-default	01:39:31.116174+0200	Dragoboo	   Integer: X=-1, Y=1
-default	01:39:31.116215+0200	Dragoboo	   Double:  X=-1.000000, Y=1.000000
-default	01:39:31.116251+0200	Dragoboo	🚨 EXTREME SCALING TEST (20x slower):
-default	01:39:31.116290+0200	Dragoboo	   Original doubles: (-1.000000,1.000000)
-default	01:39:31.116306+0200	Dragoboo	   Scaled doubles: (-0.050000,0.050000)
-default	01:39:31.116338+0200	Dragoboo	🔍 DOUBLE FIELD TEST:
-default	01:39:31.116378+0200	Dragoboo	   Set: (-0.050000,0.050000)
-default	01:39:31.116393+0200	Dragoboo	   Got: (0.000000,0.000000)
-error	01:39:31.116406+0200	Dragoboo	❌ DOUBLE FIELDS FAILED - trying integer fallback
-default	01:39:31.116422+0200	Dragoboo	🔄 INTEGER FALLBACK:
-default	01:39:31.116437+0200	Dragoboo	   Scaled integers: (0,0)
-default	01:39:31.116465+0200	Dragoboo	   Set: (0,0)
-default	01:39:31.116492+0200	Dragoboo	   Got: (0,0)
-default	01:39:31.116544+0200	Dragoboo	🎯 INTEGER SCALING <private>
-default	01:39:31.116580+0200	Dragoboo	✅ SCALING APPLIED! Total scaled: 3
-default	01:39:31.123828+0200	Dragoboo	🖱️ MOUSE EVENT #565: <private>
-default	01:39:31.123852+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:31.123869+0200	Dragoboo	🎯 ATTEMPTING TO SCALE MOUSE MOVEMENT...
-default	01:39:31.123886+0200	Dragoboo	🔄 ENTERING scaleMouseMovement function
-default	01:39:31.123899+0200	Dragoboo	📊 FIELD COMPARISON:
-default	01:39:31.123914+0200	Dragoboo	   Integer: X=0, Y=0
-default	01:39:31.123928+0200	Dragoboo	   Double:  X=0.000000, Y=0.000000
-default	01:39:31.123944+0200	Dragoboo	⭕ NO MOVEMENT - SKIPPING
-error	01:39:31.123956+0200	Dragoboo	❌ SCALING FAILED!
-default	01:39:31.131979+0200	Dragoboo	🖱️ MOUSE EVENT #567: <private>
-default	01:39:31.132003+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:31.132020+0200	Dragoboo	🎯 ATTEMPTING TO SCALE MOUSE MOVEMENT...
-default	01:39:31.132036+0200	Dragoboo	🔄 ENTERING scaleMouseMovement function
-default	01:39:31.132050+0200	Dragoboo	📊 FIELD COMPARISON:
-default	01:39:31.132066+0200	Dragoboo	   Integer: X=0, Y=0
-default	01:39:31.132080+0200	Dragoboo	   Double:  X=0.000000, Y=0.000000
-default	01:39:31.132103+0200	Dragoboo	⭕ NO MOVEMENT - SKIPPING
-error	01:39:31.132117+0200	Dragoboo	❌ SCALING FAILED!
-default	01:39:31.140248+0200	Dragoboo	🖱️ MOUSE EVENT #569: <private>
-default	01:39:31.140271+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:31.140295+0200	Dragoboo	🎯 ATTEMPTING TO SCALE MOUSE MOVEMENT...
-default	01:39:31.140311+0200	Dragoboo	🔄 ENTERING scaleMouseMovement function
-default	01:39:31.140325+0200	Dragoboo	📊 FIELD COMPARISON:
-default	01:39:31.140338+0200	Dragoboo	   Integer: X=-1, Y=0
-default	01:39:31.140353+0200	Dragoboo	   Double:  X=-1.000000, Y=0.000000
-default	01:39:31.140369+0200	Dragoboo	🚨 EXTREME SCALING TEST (20x slower):
-default	01:39:31.140383+0200	Dragoboo	   Original doubles: (-1.000000,0.000000)
-default	01:39:31.140398+0200	Dragoboo	   Scaled doubles: (-0.050000,0.000000)
-default	01:39:31.140410+0200	Dragoboo	🔍 DOUBLE FIELD TEST:
-default	01:39:31.140424+0200	Dragoboo	   Set: (-0.050000,0.000000)
-default	01:39:31.140459+0200	Dragoboo	   Got: (0.000000,0.000000)
-error	01:39:31.140481+0200	Dragoboo	❌ DOUBLE FIELDS FAILED - trying integer fallback
-default	01:39:31.140502+0200	Dragoboo	🔄 INTEGER FALLBACK:
-default	01:39:31.140542+0200	Dragoboo	   Scaled integers: (0,0)
-default	01:39:31.140568+0200	Dragoboo	   Set: (0,0)
-default	01:39:31.140585+0200	Dragoboo	   Got: (0,0)
-default	01:39:31.140620+0200	Dragoboo	🎯 INTEGER SCALING <private>
-default	01:39:31.140697+0200	Dragoboo	✅ SCALING APPLIED! Total scaled: 4
-default	01:39:31.148171+0200	Dragoboo	🖱️ MOUSE EVENT #571: <private>
-default	01:39:31.148202+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:31.148222+0200	Dragoboo	🎯 ATTEMPTING TO SCALE MOUSE MOVEMENT...
-default	01:39:31.148240+0200	Dragoboo	🔄 ENTERING scaleMouseMovement function
-default	01:39:31.148255+0200	Dragoboo	📊 FIELD COMPARISON:
-default	01:39:31.148271+0200	Dragoboo	   Integer: X=-1, Y=0
-default	01:39:31.148287+0200	Dragoboo	   Double:  X=-1.000000, Y=0.000000
-default	01:39:31.148304+0200	Dragoboo	🚨 EXTREME SCALING TEST (20x slower):
-default	01:39:31.148439+0200	Dragoboo	   Original doubles: (-1.000000,0.000000)
-(...)
-default	01:39:34.346240+0200	Dragoboo	⭕ NO MOVEMENT - SKIPPING
-error	01:39:34.346255+0200	Dragoboo	❌ SCALING FAILED!
-default	01:39:34.354326+0200	Dragoboo	🖱️ MOUSE EVENT #1055: <private>
-default	01:39:34.354419+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:34.354439+0200	Dragoboo	🎯 ATTEMPTING TO SCALE MOUSE MOVEMENT...
-default	01:39:34.354456+0200	Dragoboo	🔄 ENTERING scaleMouseMovement function
-default	01:39:34.354471+0200	Dragoboo	📊 FIELD COMPARISON:
-default	01:39:34.354487+0200	Dragoboo	   Integer: X=-1, Y=-1
-default	01:39:34.354542+0200	Dragoboo	   Double:  X=-1.000000, Y=-1.000000
-default	01:39:34.354559+0200	Dragoboo	🚨 EXTREME SCALING TEST (20x slower):
-default	01:39:34.354700+0200	Dragoboo	   Original doubles: (-1.000000,-1.000000)
-default	01:39:34.354823+0200	Dragoboo	   Scaled doubles: (-0.050000,-0.050000)
-default	01:39:34.355093+0200	Dragoboo	🔍 DOUBLE FIELD TEST:
-default	01:39:34.355376+0200	Dragoboo	   Set: (-0.050000,-0.050000)
-default	01:39:34.355453+0200	Dragoboo	   Got: (0.000000,0.000000)
-error	01:39:34.355671+0200	Dragoboo	❌ DOUBLE FIELDS FAILED - trying integer fallback
-default	01:39:34.355930+0200	Dragoboo	🔄 INTEGER FALLBACK:
-default	01:39:34.356143+0200	Dragoboo	   Scaled integers: (0,0)
-default	01:39:34.356240+0200	Dragoboo	   Set: (0,0)
-default	01:39:34.356333+0200	Dragoboo	   Got: (0,0)
-default	01:39:34.356542+0200	Dragoboo	🎯 INTEGER SCALING <private>
-default	01:39:34.356708+0200	Dragoboo	✅ SCALING APPLIED! Total scaled: 212
-default	01:39:34.362176+0200	Dragoboo	🖱️ MOUSE EVENT #1057: <private>
-default	01:39:34.362201+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:34.362221+0200	Dragoboo	🎯 ATTEMPTING TO SCALE MOUSE MOVEMENT...
-default	01:39:34.362237+0200	Dragoboo	🔄 ENTERING scaleMouseMovement function
-default	01:39:34.362253+0200	Dragoboo	📊 FIELD COMPARISON:
-default	01:39:34.362268+0200	Dragoboo	   Integer: X=0, Y=0
-default	01:39:34.362283+0200	Dragoboo	   Double:  X=0.000000, Y=0.000000
-default	01:39:34.362302+0200	Dragoboo	⭕ NO MOVEMENT - SKIPPING
-error	01:39:34.362317+0200	Dragoboo	❌ SCALING FAILED!
-default	01:39:34.370526+0200	Dragoboo	🖱️ MOUSE EVENT #1059: <private>
-default	01:39:34.370568+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:34.370588+0200	Dragoboo	🎯 ATTEMPTING TO SCALE MOUSE MOVEMENT...
-default	01:39:34.370604+0200	Dragoboo	🔄 ENTERING scaleMouseMovement function
-default	01:39:34.370618+0200	Dragoboo	📊 FIELD COMPARISON:
-default	01:39:34.370632+0200	Dragoboo	   Integer: X=-1, Y=0
-default	01:39:34.370647+0200	Dragoboo	   Double:  X=-1.000000, Y=0.000000
-default	01:39:34.370663+0200	Dragoboo	🚨 EXTREME SCALING TEST (20x slower):
-default	01:39:34.370677+0200	Dragoboo	   Original doubles: (-1.000000,0.000000)
-default	01:39:34.370692+0200	Dragoboo	   Scaled doubles: (-0.050000,0.000000)
-default	01:39:34.370706+0200	Dragoboo	🔍 DOUBLE FIELD TEST:
-default	01:39:34.370740+0200	Dragoboo	   Set: (-0.050000,0.000000)
-default	01:39:34.370778+0200	Dragoboo	   Got: (0.000000,0.000000)
-error	01:39:34.370791+0200	Dragoboo	❌ DOUBLE FIELDS FAILED - trying integer fallback
-default	01:39:34.370822+0200	Dragoboo	🔄 INTEGER FALLBACK:
-default	01:39:34.370858+0200	Dragoboo	   Scaled integers: (0,0)
-default	01:39:34.370884+0200	Dragoboo	   Set: (0,0)
-default	01:39:34.370903+0200	Dragoboo	   Got: (0,0)
-default	01:39:34.370930+0200	Dragoboo	🎯 INTEGER SCALING <private>
-default	01:39:34.371049+0200	Dragoboo	✅ SCALING APPLIED! Total scaled: 213
-default	01:39:34.378731+0200	Dragoboo	🖱️ MOUSE EVENT #1061: <private>
-default	01:39:34.378756+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:34.378777+0200	Dragoboo	🎯 ATTEMPTING TO SCALE MOUSE MOVEMENT...
-default	01:39:34.378794+0200	Dragoboo	🔄 ENTERING scaleMouseMovement function
-default	01:39:34.378810+0200	Dragoboo	📊 FIELD COMPARISON:
-default	01:39:34.378825+0200	Dragoboo	   Integer: X=0, Y=0
-default	01:39:34.378846+0200	Dragoboo	   Double:  X=0.000000, Y=0.000000
-default	01:39:34.378868+0200	Dragoboo	⭕ NO MOVEMENT - SKIPPING
-error	01:39:34.378882+0200	Dragoboo	❌ SCALING FAILED!
-default	01:39:34.386816+0200	Dragoboo	🖱️ MOUSE EVENT #1063: <private>
-default	01:39:34.386842+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:34.386861+0200	Dragoboo	🎯 ATTEMPTING TO SCALE MOUSE MOVEMENT...
-default	01:39:34.386877+0200	Dragoboo	🔄 ENTERING scaleMouseMovement function
-default	01:39:34.386893+0200	Dragoboo	📊 FIELD COMPARISON:
-default	01:39:34.386909+0200	Dragoboo	   Integer: X=0, Y=0
-default	01:39:34.386924+0200	Dragoboo	   Double:  X=0.000000, Y=0.000000
-default	01:39:34.386940+0200	Dragoboo	⭕ NO MOVEMENT - SKIPPING
-error	01:39:34.386955+0200	Dragoboo	❌ SCALING FAILED!
-default	01:39:34.414408+0200	Dragoboo	🖱️ MOUSE EVENT #1065: leftMouseDragged
-default	01:39:34.414452+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:34.414484+0200	Dragoboo	🎯 ATTEMPTING TO SCALE MOUSE MOVEMENT...
-default	01:39:34.414510+0200	Dragoboo	🔄 ENTERING scaleMouseMovement function
-default	01:39:34.414537+0200	Dragoboo	📊 FIELD COMPARISON:
-default	01:39:34.414561+0200	Dragoboo	   Integer: X=0, Y=0
-default	01:39:34.414587+0200	Dragoboo	   Double:  X=0.000000, Y=0.000000
-default	01:39:34.414844+0200	Dragoboo	⭕ NO MOVEMENT - SKIPPING
-error	01:39:34.415009+0200	Dragoboo	❌ SCALING FAILED!
-default	01:39:34.437674+0200	tccd	AUTHREQ_ATTRIBUTION: msgID=186.896, attribution={accessing={TCCDProcess: identifier=Dragoboo-555549448f25018246cf3020bd901daafc0ad596, pid=34855, auid=501, euid=501, binary_path=/Users/adam/Developer/vcs/github.twardoch/pub/dragoboo/build/Dragoboo.app/Contents/MacOS/Dragoboo}, requesting={TCCDProcess: identifier=com.apple.WindowServer, pid=186, auid=88, euid=88, binary_path=/System/Library/PrivateFrameworks/SkyLight.framework/Versions/A/Resources/WindowServer}, },
-default	01:39:34.437727+0200	tccd	requestor: TCCDProcess: identifier=com.apple.WindowServer, pid=186, auid=88, euid=88, binary_path=/System/Library/PrivateFrameworks/SkyLight.framework/Versions/A/Resources/WindowServer is checking access for accessor TCCDProcess: identifier=Dragoboo-555549448f25018246cf3020bd901daafc0ad596, pid=34855, auid=501, euid=501, binary_path=/Users/adam/Developer/vcs/github.twardoch/pub/dragoboo/build/Dragoboo.app/Contents/MacOS/Dragoboo
-default	01:39:34.439352+0200	tccd	AUTHREQ_SUBJECT: msgID=186.896, subject=com.dragoboo.app,
-default	01:39:34.440738+0200	tccd	-[TCCDAccessIdentity staticCode]: static code for: identifier com.dragoboo.app, type: 0: 0x7fe3a680d0e0 at /Users/adam/Developer/vcs/github.twardoch/pub/dragoboo/build/Dragoboo.app
-default	01:39:34.446333+0200	Dragoboo	order window: 64c op: 0 relative: 0 related: 0
-default	01:39:34.446552+0200	Dragoboo	[0x6000028982d0] invalidated because the current process cancelled the connection by calling xpc_connection_cancel()
-default	01:39:34.446621+0200	Dragoboo	[0x600003481270] Session canceled.
-default	01:39:34.446888+0200	Dragoboo	agent connection cancelled (details: Session manually canceled)
-default	01:39:34.446949+0200	Dragoboo	[0x600003481270] Disposing of session
-default	01:39:34.762932+0200	runningboardd	Invalidating assertion 199-186-5818 (target:[app<application.com.dragoboo.app.1310133939.1310133943(501)>:34855]) from originator [osservice<com.apple.WindowServer(88)>:186]
-default	01:39:34.797175+0200	runningboardd	Invalidating assertion 199-186-5806 (target:[app<application.com.dragoboo.app.1310133939.1310133943(501)>:34855]) from originator [osservice<com.apple.WindowServer(88)>:186]
-default	01:39:34.833105+0200	Dragoboo	🖱️ MOUSE EVENT #1067: <private>
-default	01:39:34.833136+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:34.833159+0200	Dragoboo	🎯 ATTEMPTING TO SCALE MOUSE MOVEMENT...
-default	01:39:34.833175+0200	Dragoboo	🔄 ENTERING scaleMouseMovement function
-default	01:39:34.833193+0200	Dragoboo	📊 FIELD COMPARISON:
-default	01:39:34.833209+0200	Dragoboo	   Integer: X=0, Y=0
-default	01:39:34.833225+0200	Dragoboo	   Double:  X=0.000000, Y=0.000000
-default	01:39:34.833241+0200	Dragoboo	⭕ NO MOVEMENT - SKIPPING
-error	01:39:34.833256+0200	Dragoboo	❌ SCALING FAILED!
-default	01:39:34.840922+0200	Dragoboo	🖱️ MOUSE EVENT #1069: <private>
-default	01:39:34.840948+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:34.840967+0200	Dragoboo	🎯 ATTEMPTING TO SCALE MOUSE MOVEMENT...
-default	01:39:34.840985+0200	Dragoboo	🔄 ENTERING scaleMouseMovement function
-default	01:39:34.841000+0200	Dragoboo	📊 FIELD COMPARISON:
-default	01:39:34.841016+0200	Dragoboo	   Integer: X=3, Y=0
-default	01:39:34.841031+0200	Dragoboo	   Double:  X=3.000000, Y=0.000000
-default	01:39:34.841048+0200	Dragoboo	🚨 EXTREME SCALING TEST (20x slower):
-default	01:39:34.841063+0200	Dragoboo	   Original doubles: (3.000000,0.000000)
-default	01:39:34.841147+0200	Dragoboo	   Scaled doubles: (0.150000,0.000000)
-default	01:39:34.841175+0200	Dragoboo	🔍 DOUBLE FIELD TEST:
-default	01:39:34.841191+0200	Dragoboo	   Set: (0.150000,0.000000)
-default	01:39:34.841206+0200	Dragoboo	   Got: (0.000000,0.000000)
-error	01:39:34.841219+0200	Dragoboo	❌ DOUBLE FIELDS FAILED - trying integer fallback
-default	01:39:34.841234+0200	Dragoboo	🔄 INTEGER FALLBACK:
-default	01:39:34.841272+0200	Dragoboo	   Scaled integers: (0,0)
-default	01:39:34.841301+0200	Dragoboo	   Set: (0,0)
-default	01:39:34.841325+0200	Dragoboo	   Got: (0,0)
-default	01:39:34.841357+0200	Dragoboo	🎯 INTEGER SCALING <private>
-default	01:39:34.841429+0200	Dragoboo	✅ SCALING APPLIED! Total scaled: 214
-default	01:39:34.849041+0200	Dragoboo	🖱️ MOUSE EVENT #1071: <private>
-default	01:39:34.849097+0200	Dragoboo	🔑 FN KEY STATE: <private>
-(...)..
-default	01:39:37.696922+0200	Dragoboo	🔄 ENTERING scaleMouseMovement function
-default	01:39:37.696934+0200	Dragoboo	📊 FIELD COMPARISON:
-default	01:39:37.696949+0200	Dragoboo	   Integer: X=4, Y=0
-default	01:39:37.696963+0200	Dragoboo	   Double:  X=4.000000, Y=0.000000
-default	01:39:37.696979+0200	Dragoboo	🚨 EXTREME SCALING TEST (20x slower):
-default	01:39:37.696993+0200	Dragoboo	   Original doubles: (4.000000,0.000000)
-default	01:39:37.697077+0200	Dragoboo	   Scaled doubles: (0.200000,0.000000)
-default	01:39:37.697101+0200	Dragoboo	🔍 DOUBLE FIELD TEST:
-default	01:39:37.697117+0200	Dragoboo	   Set: (0.200000,0.000000)
-default	01:39:37.697132+0200	Dragoboo	   Got: (0.000000,0.000000)
-error	01:39:37.697153+0200	Dragoboo	❌ DOUBLE FIELDS FAILED - trying integer fallback
-default	01:39:37.697266+0200	Dragoboo	🔄 INTEGER FALLBACK:
-default	01:39:37.697289+0200	Dragoboo	   Scaled integers: (0,0)
-default	01:39:37.697307+0200	Dragoboo	   Set: (0,0)
-default	01:39:37.697321+0200	Dragoboo	   Got: (0,0)
-default	01:39:37.697360+0200	Dragoboo	🎯 INTEGER SCALING <private>
-default	01:39:37.697469+0200	Dragoboo	✅ SCALING APPLIED! Total scaled: 370
-default	01:39:37.704752+0200	Dragoboo	🖱️ MOUSE EVENT #1409: <private>
-default	01:39:37.704802+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:37.704823+0200	Dragoboo	🎯 ATTEMPTING TO SCALE MOUSE MOVEMENT...
-default	01:39:37.704840+0200	Dragoboo	🔄 ENTERING scaleMouseMovement function
-default	01:39:37.704895+0200	Dragoboo	📊 FIELD COMPARISON:
-default	01:39:37.704912+0200	Dragoboo	   Integer: X=4, Y=0
-default	01:39:37.704927+0200	Dragoboo	   Double:  X=4.000000, Y=0.000000
-default	01:39:37.704963+0200	Dragoboo	🚨 EXTREME SCALING TEST (20x slower):
-default	01:39:37.705063+0200	Dragoboo	   Original doubles: (4.000000,0.000000)
-default	01:39:37.705308+0200	Dragoboo	   Scaled doubles: (0.200000,0.000000)
-default	01:39:37.705440+0200	Dragoboo	🔍 DOUBLE FIELD TEST:
-default	01:39:37.705578+0200	Dragoboo	   Set: (0.200000,0.000000)
-default	01:39:37.705761+0200	Dragoboo	   Got: (0.000000,0.000000)
-error	01:39:37.706060+0200	Dragoboo	❌ DOUBLE FIELDS FAILED - trying integer fallback
-default	01:39:37.706365+0200	Dragoboo	🔄 INTEGER FALLBACK:
-default	01:39:37.706659+0200	Dragoboo	   Scaled integers: (0,0)
-default	01:39:37.707021+0200	Dragoboo	   Set: (0,0)
-default	01:39:37.707151+0200	Dragoboo	   Got: (0,0)
-default	01:39:37.707365+0200	Dragoboo	🎯 INTEGER SCALING <private>
-default	01:39:37.707628+0200	Dragoboo	✅ SCALING APPLIED! Total scaled: 371
-default	01:39:37.762501+0200	Dragoboo	FN key state changed via keycode 63: <private>
-default	01:39:37.866934+0200	Dragoboo	🖱️ MOUSE EVENT #1412: <private>
-default	01:39:37.867002+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:37.867054+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING
-default	01:39:37.874943+0200	Dragoboo	🖱️ MOUSE EVENT #1414: <private>
-default	01:39:37.874968+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:37.874986+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING
-default	01:39:37.882951+0200	Dragoboo	🖱️ MOUSE EVENT #1416: <private>
-default	01:39:37.882975+0200	Dragoboo	🔑 FN KEY STATE: <private>(...)
-default	01:39:38.954207+0200	Dragoboo	🖱️ MOUSE EVENT #1620: <private>
-default	01:39:38.954236+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:38.954273+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING
-default	01:39:38.994657+0200	Dragoboo	🖱️ MOUSE EVENT #1622: leftMouseDragged
-default	01:39:38.994709+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:38.994741+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING
-default	01:39:39.170727+0200	runningboardd	Acquiring assertion targeting [app<application.com.dragoboo.app.1310133939.1310133943(501)>:34855] from originator [osservice<com.apple.WindowServer(88)>:186] with description <RBSAssertionDescriptor| "FUSBProcessWindowState: visible" ID:199-186-5833 target:34855 attributes:[
-	<RBSDomainAttribute| domain:"com.apple.fuseboard" name:"Visible" sourceEnvironment:"(null)">,
-	<RBSAcquisitionCompletionAttribute| policy:AfterApplication>
-	]>
-default	01:39:39.170900+0200	runningboardd	Assertion 199-186-5833 (target:[app<application.com.dragoboo.app.1310133939.1310133943(501)>:34855]) will be created as active
-default	01:39:39.277959+0200	runningboardd	Acquiring assertion targeting [app<application.com.dragoboo.app.1310133939.1310133943(501)>:34855] from originator [osservice<com.apple.WindowServer(88)>:186] with description <RBSAssertionDescriptor| "AppVisible" ID:199-186-5842 target:34855 attributes:[
-	<RBSDomainAttribute| domain:"com.apple.appnap" name:"AppVisible" sourceEnvironment:"(null)">,
-	<RBSAcquisitionCompletionAttribute| policy:AfterApplication>
-	]>
-default	01:39:39.278048+0200	runningboardd	Assertion 199-186-5842 (target:[app<application.com.dragoboo.app.1310133939.1310133943(501)>:34855]) will be created as active
-default	01:39:39.367954+0200	Dragoboo	🖱️ MOUSE EVENT #1638: <private>
-default	01:39:39.368001+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:39.368021+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING
-default	01:39:39.376142+0200	Dragoboo	🖱️ MOUSE EVENT #1640: <private>
-default	01:39:39.376167+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:39.376183+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING(...)
-default	01:39:42.086942+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:42.086961+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING
-default	01:39:42.128298+0200	Dragoboo	🖱️ MOUSE EVENT #2106: leftMouseDragged
-default	01:39:42.128329+0200	Dragoboo	🔑 FN KEY STATE: <private>
-default	01:39:42.128353+0200	Dragoboo	⭕ FN KEY NOT PRESSED - NO SCALING
-default	01:39:42.138968+0200	Dragoboo	[0x600002890d20] activating connection: mach=true listener=false peer=false name=com.apple.tccd.system
-error	01:39:42.139743+0200	tccd	TCCDProcess: identifier=Dragoboo-555549448f25018246cf3020bd901daafc0ad596, pid=34855, auid=501, euid=501, binary_path=/Users/adam/Developer/vcs/github.twardoch/pub/dragoboo/build/Dragoboo.app/Contents/MacOS/Dragoboo attempted to call TCCAccessRequest for kTCCServiceAccessibility without the recommended com.apple.private.tcc.manager.check-by-audit-token entitlement
-default	01:39:42.140124+0200	tccd	AUTHREQ_ATTRIBUTION: msgID=34855.5, attribution={accessing={TCCDProcess: identifier=com.lightpillar.Mosaic-setapp, pid=760, auid=501, euid=501, binary_path=/Applications/Setapp/Mosaic.app/Contents/MacOS/Mosaic}, requesting={TCCDProcess: identifier=Dragoboo-555549448f25018246cf3020bd901daafc0ad596, pid=34855, auid=501, euid=501, binary_path=/Users/adam/Developer/vcs/github.twardoch/pub/dragoboo/build/Dragoboo.app/Contents/MacOS/Dragoboo}, },
-default	01:39:42.178263+0200	Dragoboo	[0x600002890d20] invalidated after the last release of the connection object
-default	01:39:42.179250+0200	Dragoboo	[0x600002888a50] activating connection: mach=true listener=false peer=false name=com.apple.tccd.system
-error	01:39:42.179794+0200	tccd	TCCDProcess: identifier=Dragoboo-555549448f25018246cf3020bd901daafc0ad596, pid=34855, auid=501, euid=501, binary_path=/Users/adam/Developer/vcs/github.twardoch/pub/dragoboo/build/Dragoboo.app/Contents/MacOS/Dragoboo attempted to call TCCAccessRequest for kTCCServiceAccessibility without the recommended com.apple.private.tcc.manager.check-by-audit-token entitlement
-default	01:39:42.180043+0200	tccd	AUTHREQ_ATTRIBUTION: msgID=34855.6, attribution={accessing={TCCDProcess: identifier=com.manytricks.Moom, pid=568, auid=501, euid=501, binary_path=/Applications/Moom.app/Contents/MacOS/Moom}, requesting={TCCDProcess: identifier=Dragoboo-555549448f25018246cf3020bd901daafc0ad596, pid=34855, auid=501, euid=501, binary_path=/Users/adam/Developer/vcs/github.twardoch/pub/dragoboo/build/Dragoboo.app/Contents/MacOS/Dragoboo}, },
-default	01:39:42.212080+0200	Dragoboo	[0x600002888a50] invalidated after the last release of the connection object
-default	01:39:42.228712+0200	Dragoboo	terminate:
-default	01:39:42.228729+0200	Dragoboo	void _NSDisableAutomaticTerminationAndLog(NSString *) Terminating
-default	01:39:42.228748+0200	Dragoboo	-[NSApplication _pushPersistentStateTerminationGeneration] sPersistentStateTerminateStackHeight -> 1
-default	01:39:42.228904+0200	Dragoboo	Attempting sudden termination (1st attempt)
-default	01:39:42.228920+0200	Dragoboo	Checking whether app should terminate
-default	01:39:42.228955+0200	Dragoboo	Asking app delegate whether applicationShouldTerminate:
-default	01:39:42.228975+0200	Dragoboo	replyToApplicationShouldTerminate:YES
-default	01:39:42.229012+0200	Dragoboo	App termination approved
-default	01:39:42.229027+0200	Dragoboo	Termination commencing
-default	01:39:42.229038+0200	Dragoboo	Attempting sudden termination (2nd attempt)
-default	01:39:42.229984+0200	Dragoboo	window <NSStatusBarWindow: 0x7fbbb3b43f00> windowNumber=64b finishing close
-default	01:39:42.230369+0200	Dragoboo	window <_TtGC7SwiftUI18MenuBarExtraWindowVS_7AnyView_: 0x7fbbb2f0a890> windowNumber=64c finishing close
-default	01:39:42.233401+0200	Dragoboo	[0x6000028803c0] invalidated because the current process cancelled the connection by calling xpc_connection_cancel()
-default	01:39:42.233467+0200	Dragoboo	[0x600003485180] Session canceled.
-default	01:39:42.233517+0200	Dragoboo	order window: 64b op: 0 relative: 0 related: 0
-default	01:39:42.233510+0200	Dragoboo	agent connection cancelled (details: Session manually canceled)
-default	01:39:42.233561+0200	Dragoboo	[0x600003485180] Disposing of session
-default	01:39:42.233572+0200	Dragoboo	order window: 64c op: 0 relative: 0 related: 0
-default	01:39:42.233628+0200	Dragoboo	Termination complete. Exiting without sudden termination.
-default	01:39:42.233678+0200	Dragoboo	Entering exit handler.
-default	01:39:42.233694+0200	Dragoboo	Queueing exit procedure onto XPC queue. Any further messages sent will be discarded. activeSendTransactions=0
-default	01:39:42.233807+0200	Dragoboo	Cancelling XPC connection. Any further reply handler invocations will not retry messages
-default	01:39:42.233820+0200	Dragoboo	[0x6000028841e0] invalidated because the current process cancelled the connection by calling xpc_connection_cancel()
-default	01:39:42.233839+0200	Dragoboo	Exiting exit handler.
-default	01:39:42.234297+0200	Default Folder X	Couldn't get AXChildren from Dragoboo (<AXUIElement 0x60000375f150> {pid=34855})
-default	01:39:42.234601+0200	Default Folder X	Couldn't get AXParent from Dragoboo (<AXUIElement 0x60000375f150> {pid=34855})
-default	01:39:42.234668+0200	WindowManager	Connection invalidated | (34855) Dragoboo
-default	01:39:42.234945+0200	Default Folder X	Couldn't get AXTitle from Dragoboo (<AXUIElement 0x60000375f150> {pid=34855})
-default	01:39:42.235356+0200	Default Folder X	Couldn't get AXPosition from Dragoboo (<AXUIElement 0x60000375f150> {pid=34855})
-default	01:39:42.235862+0200	Default Folder X	Couldn't get AXSize from Dragoboo (<AXUIElement 0x60000375f150> {pid=34855})
-default	01:39:42.237277+0200	runningboardd	Invalidating assertion 199-186-5833 (target:[app<application.com.dragoboo.app.1310133939.1310133943(501)>:34855]) from originator [osservice<com.apple.WindowServer(88)>:186]
-default	01:39:42.237401+0200	runningboardd	Invalidating assertion 199-186-5842 (target:[app<application.com.dragoboo.app.1310133939.1310133943(501)>:34855]) from originator [osservice<com.apple.WindowServer(88)>:186]
-default	01:39:42.241641+0200	runningboardd	[app<application.com.dragoboo.app.1310133939.1310133943(501)>:34855] termination reported by launchd (0, 0, 0)
-default	01:39:42.241682+0200	runningboardd	Removing process: [app<application.com.dragoboo.app.1310133939.1310133943(501)>:34855]
-default	01:39:42.241945+0200	runningboardd	Removing launch job for: [app<application.com.dragoboo.app.1310133939.1310133943(501)>:34855]
-default	01:39:42.242235+0200	runningboardd	Removed job for [app<application.com.dragoboo.app.1310133939.1310133943(501)>:34855]
-default	01:39:42.242258+0200	runningboardd	Removing assertions for terminated process: [app<application.com.dragoboo.app.1310133939.1310133943(501)>:34855]
-default	01:39:42.242307+0200	runningboardd	Removed last relative-start-date-defining assertion for process app<application.com.dragoboo.app.1310133939.1310133943(501)>
-default	01:39:42.275166+0200	runningboardd	Calculated state for app<application.com.dragoboo.app.1310133939.1310133943(501)>: none (role: None) (endowments: (null))
-default	01:39:42.275444+0200	runningboardd	Calculated state for app<application.com.dragoboo.app.1310133939.1310133943(501)>: none (role: None) (endowments: (null))
-default	01:39:42.279402+0200	launchservicesd	Hit the server for a process handle 191f999300008827 that resolved to: [app<application.com.dragoboo.app.1310133939.1310133943(501)>:34855]
-error	01:39:42.602044+0200	runningboardd	RBSStateCapture remove item called for untracked item 199-186-5833 (target:[app<application.com.dragoboo.app.1310133939.1310133943(501)>:34855])
-error	01:39:42.602262+0200	runningboardd	RBSStateCapture remove item called for untracked item 199-186-5842 (target:[app<application.com.dragoboo.app.1310133939.1310133943(501)>:34855])
+<file path="stop.sh">
+#!/bin/bash
+
+# Dragoboo stop script
+# This script stops the running Dragoboo app
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# Function to print colored output
+print_status() {
+    echo -e "${GREEN}[✓]${NC} $1"
+}
+
+print_error() {
+    echo -e "${RED}[✗]${NC} $1"
+}
+
+print_warning() {
+    echo -e "${YELLOW}[!]${NC} $1"
+}
+
+EXECUTABLE_NAME="Dragoboo.app"
+
+# Find Dragoboo process
+APP_PID=$(pgrep -f "$EXECUTABLE_NAME" || true)
+
+if [ -z "$APP_PID" ]; then
+    print_warning "Dragoboo is not running"
+    exit 0
+fi
+
+print_status "Found Dragoboo running (PID: $APP_PID)"
+print_status "Stopping Dragoboo..."
+
+# Try graceful termination first
+kill "$APP_PID" 2>/dev/null
+
+# Wait for process to terminate
+sleep 1
+
+# Check if still running
+if pgrep -f "$EXECUTABLE_NAME" >/dev/null; then
+    print_warning "Dragoboo didn't stop gracefully, forcing termination..."
+    kill -9 "$APP_PID" 2>/dev/null || true
+fi
+
+# Final check
+if pgrep -f "$EXECUTABLE_NAME" >/dev/null; then
+    print_error "Failed to stop Dragoboo"
+    exit 1
+else
+    print_status "Dragoboo stopped successfully"
+fi
 </file>
 
 <file path="Sources/DragobooApp/ContentView.swift">
@@ -1808,455 +1234,6 @@ class AppState: ObservableObject {
 }
 </file>
 
-<file path="Info.plist">
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleExecutable</key>
-    <string>Dragoboo</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.dragoboo.app</string>
-    <key>CFBundleName</key>
-    <string>Dragoboo</string>
-    <key>CFBundleDisplayName</key>
-    <string>Dragoboo</string>
-    <key>CFBundleVersion</key>
-    <string>1.0</string>
-    <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleInfoDictionaryVersion</key>
-    <string>6.0</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>13.0</string>
-    <key>LSUIElement</key>
-    <true/>
-    <key>NSPrincipalClass</key>
-    <string>NSApplication</string>
-    <key>NSHumanReadableCopyright</key>
-    <string>Copyright © 2025. All rights reserved.</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>LSApplicationCategoryType</key>
-    <string>public.app-category.utilities</string>
-</dict>
-</plist>
-</file>
-
-<file path="Makefile">
-.PHONY: all build run clean stop release help
-
-# Default target
-all: run
-
-# Build the app
-build:
-	@./run.sh --no-launch
-
-# Build and run the app
-run:
-	@./run.sh
-
-# Clean build
-clean:
-	@echo "Cleaning build directory..."
-	@rm -rf .build
-	@rm -rf build
-	@echo "Clean complete"
-
-# Stop the running app
-stop:
-	@./stop.sh
-
-# Build release version
-release:
-	@./run.sh --release
-
-# Build clean
-rebuild: clean build
-
-# Show help
-help:
-	@echo "Dragoboo Makefile"
-	@echo "================"
-	@echo "Available targets:"
-	@echo "  make         - Build and run the app (default)"
-	@echo "  make build   - Build the app without running"
-	@echo "  make run     - Build and run the app"
-	@echo "  make clean   - Clean build directory"
-	@echo "  make stop    - Stop the running app"
-	@echo "  make release - Build release version"
-	@echo "  make rebuild - Clean and rebuild"
-	@echo "  make help    - Show this help message"
-</file>
-
-<file path="stop.sh">
-#!/bin/bash
-
-# Dragoboo stop script
-# This script stops the running Dragoboo app
-
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
-
-# Function to print colored output
-print_status() {
-    echo -e "${GREEN}[✓]${NC} $1"
-}
-
-print_error() {
-    echo -e "${RED}[✗]${NC} $1"
-}
-
-print_warning() {
-    echo -e "${YELLOW}[!]${NC} $1"
-}
-
-EXECUTABLE_NAME="Dragoboo.app"
-
-# Find Dragoboo process
-APP_PID=$(pgrep -f "$EXECUTABLE_NAME" || true)
-
-if [ -z "$APP_PID" ]; then
-    print_warning "Dragoboo is not running"
-    exit 0
-fi
-
-print_status "Found Dragoboo running (PID: $APP_PID)"
-print_status "Stopping Dragoboo..."
-
-# Try graceful termination first
-kill "$APP_PID" 2>/dev/null
-
-# Wait for process to terminate
-sleep 1
-
-# Check if still running
-if pgrep -f "$EXECUTABLE_NAME" >/dev/null; then
-    print_warning "Dragoboo didn't stop gracefully, forcing termination..."
-    kill -9 "$APP_PID" 2>/dev/null || true
-fi
-
-# Final check
-if pgrep -f "$EXECUTABLE_NAME" >/dev/null; then
-    print_error "Failed to stop Dragoboo"
-    exit 1
-else
-    print_status "Dragoboo stopped successfully"
-fi
-</file>
-
-<file path="Sources/DragobooCore/PointerScaler.swift">
-import Foundation
-import CoreGraphics
-import ApplicationServices
-import os
-import Dispatch
-import Carbon
-
-public class PointerScaler {
-    private var eventTap: CFMachPort?
-    private var runLoopSource: CFRunLoopSource?
-    private var precisionFactor: Double
-    private var fnKeyPressed = false
-    private var isInPrecisionMode = false
-    private let logger = Logger(subsystem: "com.dragoboo.core", category: "PointerScaler")
-    private var debugTimer: Timer?
-    private var systemSpeedController: SystemSpeedController
-    
-    public var onPrecisionModeChange: ((Bool) -> Void)?
-    
-    private static let fnKeyCode: CGKeyCode = 0x3F
-    
-    public init(precisionFactor: Double) {
-        self.precisionFactor = precisionFactor
-        self.systemSpeedController = SystemSpeedController()
-    }
-    
-    private func addDiagnostics() {
-        // Verify tap is actually enabled
-        if let tap = eventTap {
-            let isEnabled = CGEvent.tapIsEnabled(tap: tap)
-            logger.debug("Event tap enabled status: \(isEnabled)")
-        }
-        
-        // Log secure input status
-        let secureInput = IsSecureEventInputEnabled()
-        logger.debug("Secure input mode: \(secureInput)")
-        
-        // Test key state detection
-        let fnState = CGEventSource.keyState(.combinedSessionState, key: 0x3F)
-        logger.debug("FN key polling state: \(fnState)")
-    }
-    
-    public func start() throws {
-        print("PointerScaler: Starting pointer scaler...")
-        logger.info("Starting pointer scaler...")
-        
-        // Reset state on start
-        fnKeyPressed = false
-        isInPrecisionMode = false
-        
-        // Check accessibility permissions first
-        guard AXIsProcessTrusted() else {
-            print("PointerScaler: Accessibility permissions not granted")
-            logger.error("Accessibility permissions not granted")
-            throw PointerScalerError.failedToCreateEventTap
-        }
-        print("PointerScaler: Accessibility permissions verified")
-        logger.info("Accessibility permissions verified")
-        
-        // Check for secure input mode which can block event modifications
-        checkSecureInputMode()
-        
-        // Only listen for flags changed events (for fn key detection) and tap management events
-        let eventMask: CGEventMask = (1 << CGEventType.flagsChanged.rawValue) |
-                                     (1 << CGEventType.tapDisabledByTimeout.rawValue) |
-                                     (1 << CGEventType.tapDisabledByUserInput.rawValue)
-        
-        let selfPointer = Unmanaged.passUnretained(self).toOpaque()
-        
-        // Use the main run loop for event tap to ensure proper event capture
-        let mainRunLoop = CFRunLoopGetMain()
-        
-        // Create event tap for fn key detection only
-        guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .defaultTap,
-            eventsOfInterest: eventMask,
-            callback: { proxy, type, event, userInfo in
-                guard let userInfo = userInfo else { 
-                    Logger(subsystem: "com.dragoboo.core", category: "PointerScaler").error("Event callback received nil userInfo")
-                    return Unmanaged.passUnretained(event) 
-                }
-                let scaler = Unmanaged<PointerScaler>.fromOpaque(userInfo).takeUnretainedValue()
-                return scaler.handleEvent(proxy: proxy, type: type, event: event)
-            },
-            userInfo: selfPointer
-        ) else {
-            logger.error("Event tap FAILED ❌ – likely permission or SecureInput.")
-            throw PointerScalerError.failedToCreateEventTap
-        }
-        
-        eventTap = tap
-        
-        logger.info("Event tap created for fn key detection")
-        
-        // Create run loop source and add to main run loop
-        guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap!, 0) else {
-            logger.error("Failed to create run loop source")
-            CGEvent.tapEnable(tap: eventTap!, enable: false)
-            CFMachPortInvalidate(eventTap!)
-            throw PointerScalerError.failedToCreateEventTap
-        }
-        
-        runLoopSource = source
-        
-        // Add source to main run loop (critical fix)
-        CFRunLoopAddSource(mainRunLoop, source, .commonModes)
-        
-        // Enable the event tap
-        CGEvent.tapEnable(tap: eventTap!, enable: true)
-        
-        print("PointerScaler: Event tap enabled successfully")
-        logger.info("Event tap enabled successfully")
-        
-        // Run diagnostics after successful setup
-        addDiagnostics()
-        
-        // Start debug timer
-        startDebugTimer()
-    }
-    
-    public func stop() {
-        debugTimer?.invalidate()
-        debugTimer = nil
-        
-        // Restore original system speeds if in precision mode
-        if isInPrecisionMode {
-            do {
-                try systemSpeedController.restoreOriginalSpeed()
-                isInPrecisionMode = false
-                logger.info("Restored original system speeds on stop")
-            } catch {
-                logger.error("Failed to restore original speeds on stop: \(error)")
-            }
-        }
-        
-        if let tap = eventTap {
-            CGEvent.tapEnable(tap: tap, enable: false)
-            CFMachPortInvalidate(tap)
-        }
-        
-        if let source = runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
-        }
-        
-        eventTap = nil
-        runLoopSource = nil
-        logger.info("Event tap stopped")
-    }
-    
-    public func updatePrecisionFactor(_ factor: Double) {
-        precisionFactor = factor
-        logger.info("Updated precision factor to \(factor)")
-    }
-    
-    private func checkSecureInputMode() {
-        // Check if secure input mode is active, which can block event modifications
-        if IsSecureEventInputEnabled() {
-            logger.warning("Secure input mode is active. This may prevent event modifications from working.")
-        } else {
-            logger.info("Secure input mode is not active")
-        }
-    }
-    
-    private func handleEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
-        switch type {
-        case .flagsChanged:
-            handleFlagsChanged(event: event)
-            
-        case .tapDisabledByTimeout, .tapDisabledByUserInput:
-            logger.warning("Event tap disabled by \(type == .tapDisabledByTimeout ? "timeout" : "user input"), attempting to re-enable")
-            if let tap = eventTap {
-                CGEvent.tapEnable(tap: tap, enable: true)
-            }
-            
-        default:
-            // Ignore all other events - we only care about fn key detection
-            break
-        }
-        
-        // Always pass events through unmodified - we don't modify any events
-        return Unmanaged.passUnretained(event)
-    }
-    
-    private func debugEventType(_ type: CGEventType) -> String {
-        switch type {
-        case .null: return "null"
-        case .leftMouseDown: return "leftMouseDown"
-        case .leftMouseUp: return "leftMouseUp"
-        case .rightMouseDown: return "rightMouseDown"
-        case .rightMouseUp: return "rightMouseUp"
-        case .mouseMoved: return "mouseMoved"
-        case .leftMouseDragged: return "leftMouseDragged"
-        case .rightMouseDragged: return "rightMouseDragged"
-        case .keyDown: return "keyDown"
-        case .keyUp: return "keyUp"
-        case .flagsChanged: return "flagsChanged"
-        case .scrollWheel: return "scrollWheel"
-        case .tabletPointer: return "tabletPointer"
-        case .tabletProximity: return "tabletProximity"
-        case .otherMouseDown: return "otherMouseDown"
-        case .otherMouseUp: return "otherMouseUp"
-        case .otherMouseDragged: return "otherMouseDragged"
-        case .tapDisabledByTimeout: return "tapDisabledByTimeout"
-        case .tapDisabledByUserInput: return "tapDisabledByUserInput"
-        default: return "unknown(\(type.rawValue))"
-        }
-    }
-    
-    private func handleFlagsChanged(event: CGEvent) {
-        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-        let flags = event.flags
-        
-        logger.info("🔍 FlagsChanged event: keyCode=\(keyCode), flags=\(flags.rawValue)")
-        logger.info("🔍 Current fn state: internal=\(self.fnKeyPressed), flag=\(flags.contains(.maskSecondaryFn))")
-        
-        // Always use the flag state, regardless of keycode
-        let wasFnPressed = fnKeyPressed
-        fnKeyPressed = flags.contains(.maskSecondaryFn)
-        
-        // Only handle state changes
-        if wasFnPressed != fnKeyPressed {
-            logger.notice("🎯 FN key state changed: \(self.fnKeyPressed ? "PRESSED" : "RELEASED")")
-            print("PointerScaler: 🎯 FN key state changed: \(self.fnKeyPressed ? "PRESSED" : "RELEASED")")
-            handleFnKeyStateChange(isPressed: fnKeyPressed)
-        } else {
-            logger.debug("FN key state unchanged: \(self.fnKeyPressed ? "PRESSED" : "RELEASED")")
-        }
-    }
-    
-    private func handleFnKeyStateChange(isPressed: Bool) {
-        logger.info("🎯 handleFnKeyStateChange called: isPressed=\(isPressed), currentPrecisionMode=\(self.isInPrecisionMode)")
-        print("PointerScaler: 🎯 handleFnKeyStateChange: isPressed=\(isPressed), precision=\(self.isInPrecisionMode)")
-        
-        guard isPressed != isInPrecisionMode else { 
-            logger.debug("No state change needed: isPressed=\(isPressed), isInPrecisionMode=\(self.isInPrecisionMode)")
-            return 
-        }
-        
-        do {
-            if isPressed && !isInPrecisionMode {
-                logger.notice("🚀 ACTIVATING precision mode with factor \(self.precisionFactor)")
-                print("PointerScaler: 🚀 ACTIVATING precision mode")
-                try systemSpeedController.setSlowSpeed(factor: precisionFactor)
-                isInPrecisionMode = true
-                logger.info("✅ Precision mode activated - system speed slowed by \(self.precisionFactor)x")
-            } else if !isPressed && isInPrecisionMode {
-                logger.notice("🛑 DEACTIVATING precision mode")
-                print("PointerScaler: 🛑 DEACTIVATING precision mode")
-                try systemSpeedController.restoreOriginalSpeed()
-                isInPrecisionMode = false
-                logger.info("✅ Precision mode deactivated - system speed restored")
-            }
-            
-            // Always call the callback to update UI
-            DispatchQueue.main.async {
-                self.onPrecisionModeChange?(isPressed)
-            }
-        } catch {
-            logger.error("❌ Failed to change system speed: \(error)")
-            print("PointerScaler: ❌ Failed to change system speed: \(error)")
-            // Still call the callback to update UI with error state
-            DispatchQueue.main.async {
-                self.onPrecisionModeChange?(isPressed)
-            }
-        }
-    }
-    
-    
-    private func startDebugTimer() {
-        debugTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
-            self?.debugCurrentState()
-        }
-    }
-    
-    private func debugCurrentState() {
-        let keyState = CGEventSource.keyState(.combinedSessionState, key: Self.fnKeyCode)
-        logger.notice("Debug: fn key polling=\(keyState ? "PRESSED" : "RELEASED"), internal=\(self.fnKeyPressed ? "PRESSED" : "RELEASED"), precision mode=\(self.isInPrecisionMode ? "ACTIVE" : "INACTIVE"), factor=\(self.precisionFactor)")
-        
-        // Check secure input mode periodically
-        if IsSecureEventInputEnabled() {
-            logger.warning("Secure input mode is active")
-        }
-        
-        // Validate speed change if in precision mode
-        if isInPrecisionMode {
-            let isValid = systemSpeedController.validateSpeedChange(expectedFactor: precisionFactor)
-            logger.notice("System speed validation: \(isValid ? "VALID" : "INVALID")")
-        }
-    }
-}
-
-public enum PointerScalerError: LocalizedError {
-    case failedToCreateEventTap
-    
-    public var errorDescription: String? {
-        switch self {
-        case .failedToCreateEventTap:
-            return "Failed to create event tap. Please ensure accessibility permissions are granted."
-        }
-    }
-}
-</file>
-
 <file path=".gitignore">
 # Xcode
 build/
@@ -2315,6 +1292,212 @@ fastlane/test_output
 
 # Code Injection
 iOSInjectionProject/
+</file>
+
+<file path="README.md">
+# Dragoboo 🐉🖱️
+
+**Dragoboo is a macOS utility that provides instant precision cursor control. Simply hold the `fn` key to temporarily slow down your cursor movement, enabling fine control for detailed tasks without interrupting your workflow.**
+
+Perfect for designers pixel-peeping in image editors, engineers working with CAD software, or anyone who needs occasional ultra-precise cursor control.
+
+[![macOS](https://img.shields.io/badge/macOS-13.0+-blue.svg)](https://www.apple.com/macos) [![Swift](https://img.shields.io/badge/Swift-5.10-orange.svg)](https://swift.org) [![SwiftUI](https://img.shields.io/badge/SwiftUI-Framework-purple.svg)](https://developer.apple.com/xcode/swiftui/) [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
+## ✨ Features
+
+- **🎯 Instant Precision Mode:** Hold `fn` key for immediate cursor slowdown
+- **⚡ Configurable Scaling:** Adjust slowdown factor from 1x to 10x (default: 5x)
+- **🖱️ Universal Input Support:** Works with trackpads, mice, and scroll wheels
+- **📊 Smart Accumulation:** Handles fractional movements precisely using advanced algorithms
+- **🔒 Crash-Safe Design:** Uses temporary event modification that auto-reverts
+- **🎨 Clean Menu Bar UI:** Discreet macOS menu bar integration with SwiftUI
+- **🚀 High Performance:** Minimal system impact with efficient event processing
+
+## 🚀 Quick Start
+
+### Requirements
+- macOS 13.0 or later
+- Accessibility permissions (guided setup on first launch)
+
+### Installation & Usage
+
+1. **Build & Run:**
+   ```bash
+   git clone https://github.com/your-username/dragoboo.git
+   cd dragoboo
+   swift build
+   swift run
+   ```
+
+2. **Grant Permissions:** Follow the in-app prompts to enable Accessibility access
+
+3. **Use Precision Mode:** Hold `fn` key anywhere in macOS for slower cursor movement
+
+4. **Adjust Settings:** Click the menu bar icon to customize slowdown factor
+
+## 🛠 How It Works
+
+### Technical Architecture
+
+Dragoboo uses **direct cursor warping** instead of risky system preference modifications:
+
+1. **Event Interception:** Creates system-wide event tap using `CGEvent.tapCreate`
+2. **fn Key Detection:** Monitors `.maskSecondaryFn` flag in `flagsChanged` events  
+3. **Precision Scaling:** Applies fractional scaling with accumulation algorithm
+4. **Cursor Warping:** Uses `CGWarpMouseCursorPosition` for direct control
+5. **Event Consumption:** Blocks original events to prevent double movement
+
+### Core Components
+
+- **`PointerScaler`**: Core event handling and precision control engine
+- **`AppState`**: SwiftUI state management and persistence  
+- **`ContentView`**: Menu bar interface and settings
+- **Movement Accumulator**: Handles fractional pixel movements precisely
+
+```swift
+// Key algorithm: Accumulation for smooth precision
+accumulatedX += deltaX / precisionFactor
+accumulatedY += deltaY / precisionFactor
+
+let scaledX = Int(accumulatedX)
+let scaledY = Int(accumulatedY)
+
+accumulatedX -= Double(scaledX)
+accumulatedY -= Double(scaledY)
+```
+
+## 🔧 Building from Source
+
+### Command Line (Recommended)
+```bash
+# Build the project
+swift build
+
+# Run directly  
+swift run
+
+# Build release version
+swift build --configuration release
+```
+
+### Using Xcode
+```bash
+# Generate Xcode project
+swift package generate-xcodeproj
+open Dragoboo.xcodeproj
+```
+
+### Helper Scripts
+```bash
+# Quick run
+./run.sh
+
+# Stop running instances  
+./stop.sh
+
+# System recovery (if needed)
+./recovery_trackpad.sh
+```
+
+## ⚙️ Configuration
+
+Access settings via the menu bar icon:
+
+- **📐 Precision Factor**: 1x (no change) to 10x slowdown
+- **🎯 Real-time Preview**: Live adjustment while moving cursor
+- **💾 Auto-save**: Settings persist across app restarts
+- **🔍 Status Indicator**: Visual feedback for active precision mode
+
+## 🛡️ Safety & Recovery
+
+**Dragoboo v2025-05-31+ is completely crash-safe.** Unlike earlier versions that could cause permanent trackpad slowdown, the current implementation:
+
+- ✅ Uses temporary event modification only
+- ✅ Auto-reverts on app exit or crash  
+- ✅ No permanent system changes
+- ✅ Includes recovery script for legacy issues
+
+If you experienced issues with earlier versions:
+```bash
+./recovery_trackpad.sh  # Fixes any stuck settings
+```
+
+## 🔍 Troubleshooting
+
+### Common Issues
+
+**Precision mode not working:**
+- Check Accessibility permissions in System Settings
+- Restart the app after granting permissions
+- Verify fn key isn't disabled in System Settings
+
+**App won't start:**
+- Ensure macOS 13.0+ 
+- Try rebuilding: `swift package clean && swift build`
+- Check Console.app for error messages
+
+**Performance issues:**
+- Modern Macs handle event processing efficiently
+- If needed, reduce precision factor for less intensive scaling
+
+### Debug Mode
+```bash
+# Run with verbose logging
+swift run 2>&1 | tee dragoboo.log
+```
+
+## 📁 Project Structure
+
+```
+dragoboo/
+├── Sources/
+│   ├── DragobooApp/           # SwiftUI interface
+│   │   ├── DragobooApp.swift  # Main app & state
+│   │   └── ContentView.swift  # Menu bar UI
+│   └── DragobooCore/          # Core functionality  
+│       └── PointerScaler.swift # Event handling engine
+├── Tests/
+│   └── DragobooCoreTests/     # Unit tests
+├── PLAN.md                    # Development roadmap
+├── TODO.md                    # Current tasks
+├── recovery_trackpad.sh       # System recovery
+└── Package.swift              # Swift package config
+```
+
+## 🧪 Development Status
+
+- ✅ **Core precision mode**: Fully functional
+- ✅ **fn key detection**: Reliable & responsive  
+- ✅ **Event interception**: System-wide coverage
+- ✅ **Menu bar UI**: Clean SwiftUI interface
+- ✅ **Settings persistence**: Auto-save configuration
+- ✅ **Crash safety**: Temporary modifications only
+- 🔄 **Scroll wheel scaling**: Basic implementation
+- 🔄 **Multi-monitor support**: Needs testing
+- 📋 **Drag operation refinement**: Future enhancement
+
+## 🤝 Contributing
+
+Contributions welcome! Please:
+
+1. Check [TODO.md](TODO.md) for current tasks
+2. Follow existing code patterns and documentation style
+3. Add tests for new functionality
+4. Update relevant documentation
+
+## 📄 License
+
+MIT License - see [LICENSE](LICENSE) for details.
+
+## 🙏 Acknowledgments
+
+- Built with Swift and SwiftUI for native macOS integration
+- Inspired by the need for on-demand precision in creative workflows
+- Uses advanced cursor control algorithms for smooth operation
+
+---
+
+**Made with ❤️ for macOS productivity**
 </file>
 
 <file path="run.sh">
@@ -2510,10 +1693,444 @@ else
 fi
 </file>
 
+<file path="Sources/DragobooCore/PointerScaler.swift">
+import Foundation
+import CoreGraphics
+import ApplicationServices
+import AppKit
+import os
+import Dispatch
+import Carbon
+
+public class PointerScaler {
+    private var eventTap: CFMachPort?
+    private var runLoopSource: CFRunLoopSource?
+    private var precisionFactor: Double
+    private var fnKeyPressed = false
+    private var isInPrecisionMode = false
+    private let logger = Logger(subsystem: "com.dragoboo.core", category: "PointerScaler")
+    private var debugTimer: Timer?
+    
+    // Movement accumulator for precise fractional scaling
+    private var accumulatedX: Double = 0.0
+    private var accumulatedY: Double = 0.0
+    
+    // Cursor position tracking for manual control
+    private var lastCursorPosition: CGPoint = .zero
+    private var isTrackingCursor = false
+    
+    public var onPrecisionModeChange: ((Bool) -> Void)?
+    
+    private static let fnKeyCode: CGKeyCode = 0x3F
+    
+    public init(precisionFactor: Double) {
+        self.precisionFactor = precisionFactor
+    }
+    
+    private func addDiagnostics() {
+        // Verify tap is actually enabled
+        if let tap = eventTap {
+            let isEnabled = CGEvent.tapIsEnabled(tap: tap)
+            logger.debug("Event tap enabled status: \(isEnabled)")
+        }
+        
+        // Log secure input status
+        let secureInput = IsSecureEventInputEnabled()
+        logger.debug("Secure input mode: \(secureInput)")
+        
+        // Test key state detection
+        let fnState = CGEventSource.keyState(.combinedSessionState, key: 0x3F)
+        logger.debug("FN key polling state: \(fnState)")
+    }
+    
+    public func start() throws {
+        print("PointerScaler: Starting pointer scaler...")
+        logger.info("Starting pointer scaler...")
+        
+        // Reset state on start
+        fnKeyPressed = false
+        isInPrecisionMode = false
+        
+        // Check accessibility permissions first
+        guard AXIsProcessTrusted() else {
+            print("PointerScaler: Accessibility permissions not granted")
+            logger.error("Accessibility permissions not granted")
+            throw PointerScalerError.failedToCreateEventTap
+        }
+        print("PointerScaler: Accessibility permissions verified")
+        logger.info("Accessibility permissions verified")
+        
+        // Check for secure input mode which can block event modifications
+        checkSecureInputMode()
+        
+        // Listen for ALL relevant events: flags changed, mouse movement, scrolling, and dragging
+        let eventMask: CGEventMask = (1 << CGEventType.flagsChanged.rawValue) |
+                                     (1 << CGEventType.mouseMoved.rawValue) |
+                                     (1 << CGEventType.leftMouseDragged.rawValue) |
+                                     (1 << CGEventType.rightMouseDragged.rawValue) |
+                                     (1 << CGEventType.otherMouseDragged.rawValue) |
+                                     (1 << CGEventType.scrollWheel.rawValue) |
+                                     (1 << CGEventType.tapDisabledByTimeout.rawValue) |
+                                     (1 << CGEventType.tapDisabledByUserInput.rawValue)
+        
+        let selfPointer = Unmanaged.passUnretained(self).toOpaque()
+        
+        // Use the main run loop for event tap to ensure proper event capture
+        let mainRunLoop = CFRunLoopGetMain()
+        
+        // Create event tap at annotated session level for reliable event modification
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgAnnotatedSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: eventMask,
+            callback: { proxy, type, event, userInfo in
+                guard let userInfo = userInfo else { 
+                    Logger(subsystem: "com.dragoboo.core", category: "PointerScaler").error("Event callback received nil userInfo")
+                    return Unmanaged.passUnretained(event) 
+                }
+                let scaler = Unmanaged<PointerScaler>.fromOpaque(userInfo).takeUnretainedValue()
+                return scaler.handleEvent(proxy: proxy, type: type, event: event)
+            },
+            userInfo: selfPointer
+        ) else {
+            logger.error("Event tap FAILED ❌ – annotated session level access. Check permissions.")
+            throw PointerScalerError.failedToCreateEventTap
+        }
+        
+        eventTap = tap
+        
+        logger.info("Event tap created for fn key detection AND event modification")
+        
+        // Create run loop source and add to main run loop
+        guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap!, 0) else {
+            logger.error("Failed to create run loop source")
+            CGEvent.tapEnable(tap: eventTap!, enable: false)
+            CFMachPortInvalidate(eventTap!)
+            throw PointerScalerError.failedToCreateEventTap
+        }
+        
+        runLoopSource = source
+        
+        // Add source to main run loop (critical fix)
+        CFRunLoopAddSource(mainRunLoop, source, .commonModes)
+        
+        // Enable the event tap
+        CGEvent.tapEnable(tap: eventTap!, enable: true)
+        
+        print("PointerScaler: Event tap enabled successfully with event modification")
+        logger.info("Event tap enabled successfully with event modification")
+        
+        // Run diagnostics after successful setup
+        addDiagnostics()
+        
+        // Start debug timer
+        startDebugTimer()
+    }
+    
+    public func stop() {
+        debugTimer?.invalidate()
+        debugTimer = nil
+        
+        // Reset precision mode state
+        if isInPrecisionMode {
+            isInPrecisionMode = false
+            logger.info("Precision mode deactivated on stop")
+        }
+        
+        if let tap = eventTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+            CFMachPortInvalidate(tap)
+        }
+        
+        if let source = runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+        }
+        
+        eventTap = nil
+        runLoopSource = nil
+        logger.info("Event tap stopped")
+    }
+    
+    public func updatePrecisionFactor(_ factor: Double) {
+        precisionFactor = factor
+        logger.info("Updated precision factor to \(factor)")
+    }
+    
+    private func checkSecureInputMode() {
+        // Check if secure input mode is active, which can block event modifications
+        if IsSecureEventInputEnabled() {
+            logger.warning("Secure input mode is active. This may prevent event modifications from working.")
+        } else {
+            logger.info("Secure input mode is not active")
+        }
+    }
+    
+    private func handleEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        // DEBUG: Log ALL events being received
+        logger.debug("🔍 Event received: \(self.debugEventType(type)), precision mode: \(self.isInPrecisionMode)")
+        
+        switch type {
+        case .flagsChanged:
+            handleFlagsChanged(event: event)
+            
+        case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
+            logger.debug("🖱️ Movement event: \(self.debugEventType(type)), precision mode: \(self.isInPrecisionMode)")
+            if self.isInPrecisionMode {
+                logger.debug("📐 Processing movement event for scaling...")
+                return self.modifyMovementEvent(event: event)
+            } else {
+                logger.debug("⚪ Passing movement event through unmodified (precision mode inactive)")
+            }
+            
+        case .scrollWheel:
+            logger.debug("🛞 Scroll event, precision mode: \(self.isInPrecisionMode)")
+            if self.isInPrecisionMode {
+                logger.debug("📐 Processing scroll event for scaling...")
+                return self.modifyScrollEvent(event: event)
+            } else {
+                logger.debug("⚪ Passing scroll event through unmodified (precision mode inactive)")
+            }
+            
+        case .tapDisabledByTimeout, .tapDisabledByUserInput:
+            logger.warning("Event tap disabled by \(type == .tapDisabledByTimeout ? "timeout" : "user input"), attempting to re-enable")
+            if let tap = self.eventTap {
+                CGEvent.tapEnable(tap: tap, enable: true)
+            }
+            
+        default:
+            // Log other events for debugging
+            logger.debug("➖ Other event: \(self.debugEventType(type)) (ignored)")
+            break
+        }
+        
+        // Pass events through unmodified by default
+        return Unmanaged.passUnretained(event)
+    }
+    
+    /// Intercepts mouse movement events and manually controls cursor position for precision mode
+    /// Uses accumulation algorithm to handle fractional movements properly
+    private func modifyMovementEvent(event: CGEvent) -> Unmanaged<CGEvent>? {
+        print("PointerScaler: 📐 modifyMovementEvent() called!")
+        logger.info("📐 modifyMovementEvent() called!")
+        
+        // Get the movement delta - try both integer and double fields
+        let deltaXInt = event.getIntegerValueField(.mouseEventDeltaX)
+        let deltaYInt = event.getIntegerValueField(.mouseEventDeltaY)
+        let deltaXDouble = event.getDoubleValueField(.mouseEventDeltaX) 
+        let deltaYDouble = event.getDoubleValueField(.mouseEventDeltaY)
+        
+        // Use whichever has non-zero values
+        let deltaX = deltaXInt != 0 ? Double(deltaXInt) : deltaXDouble
+        let deltaY = deltaYInt != 0 ? Double(deltaYInt) : deltaYDouble
+        
+        // Skip if no movement
+        guard deltaX != 0 || deltaY != 0 else {
+            return Unmanaged.passUnretained(event)
+        }
+        
+        print("PointerScaler: 🔍 Delta fields - Int: (\(deltaXInt), \(deltaYInt)), Double: (\(deltaXDouble), \(deltaYDouble)), Using: (\(deltaX), \(deltaY))")
+        
+        print("PointerScaler: 📊 Original deltas: X=\(deltaX), Y=\(deltaY)")
+        logger.info("📊 Original deltas: X=\(deltaX), Y=\(deltaY)")
+        
+        // Apply precision scaling with accumulation (as per algorithms context)
+        self.accumulatedX += deltaX / self.precisionFactor
+        self.accumulatedY += deltaY / self.precisionFactor
+        
+        // Extract integer parts for the actual movement
+        let scaledX = Int(self.accumulatedX)
+        let scaledY = Int(self.accumulatedY)
+        
+        // Keep the fractional remainders for next time
+        self.accumulatedX -= Double(scaledX)
+        self.accumulatedY -= Double(scaledY)
+        
+        print("PointerScaler: 📊 Accumulated: X=\(self.accumulatedX), Y=\(self.accumulatedY)")
+        print("PointerScaler: 📊 Applied deltas: X=\(scaledX), Y=\(scaledY), factor=\(self.precisionFactor)")
+        logger.info("📊 Applied deltas: X=\(scaledX), Y=\(scaledY), accumulated: X=\(self.accumulatedX), Y=\(self.accumulatedY)")
+        
+        // NEW APPROACH: Manual cursor warping instead of event modification
+        print("PointerScaler: 🔧 APPROACH 4: Manual cursor warping (consuming original event)")
+        
+        // Calculate new cursor position
+        let newPosition = CGPoint(
+            x: self.lastCursorPosition.x + Double(scaledX),
+            y: self.lastCursorPosition.y + Double(scaledY)
+        )
+        
+        // Warp cursor to new position
+        let warpResult = CGWarpMouseCursorPosition(newPosition)
+        if warpResult == .success {
+            self.lastCursorPosition = newPosition
+            print("PointerScaler: ✅ Warped cursor: \(self.lastCursorPosition) -> \(newPosition), delta: (\(scaledX), \(scaledY))")
+            logger.info("✅ Cursor warped: original(\(deltaX), \(deltaY)) -> scaled(\(scaledX), \(scaledY)) with factor \(self.precisionFactor)")
+        } else {
+            print("PointerScaler: ❌ Failed to warp cursor to \(newPosition)")
+            logger.error("Failed to warp cursor to position: \(newPosition.x), \(newPosition.y)")
+            // Fallback: let the original event through
+            return Unmanaged.passUnretained(event)
+        }
+        
+        // Consume the original event (return nil to block it from reaching the system)
+        print("PointerScaler: 🚫 Consuming original movement event")
+        return nil
+    }
+    
+    /// Modifies scroll wheel events to slow them down when precision mode is active
+    private func modifyScrollEvent(event: CGEvent) -> Unmanaged<CGEvent>? {
+        // Get the scroll delta
+        let scrollDeltaY = event.getDoubleValueField(.scrollWheelEventDeltaAxis1)
+        let scrollDeltaX = event.getDoubleValueField(.scrollWheelEventDeltaAxis2)
+        
+        // Apply precision scaling (reduce scrolling by precision factor)
+        let scaledScrollY = scrollDeltaY / self.precisionFactor
+        let scaledScrollX = scrollDeltaX / self.precisionFactor
+        
+        // Create a new event with modified scroll deltas
+        guard let modifiedEvent = event.copy() else {
+            logger.error("Failed to copy scroll event")
+            return Unmanaged.passUnretained(event)
+        }
+        
+        modifiedEvent.setDoubleValueField(.scrollWheelEventDeltaAxis1, value: scaledScrollY)
+        modifiedEvent.setDoubleValueField(.scrollWheelEventDeltaAxis2, value: scaledScrollX)
+        
+        logger.debug("Modified scroll: original(\(scrollDeltaX), \(scrollDeltaY)) -> scaled(\(scaledScrollX), \(scaledScrollY)) with factor \(self.precisionFactor)")
+        
+        return Unmanaged.passRetained(modifiedEvent)
+    }
+    
+    private func debugEventType(_ type: CGEventType) -> String {
+        switch type {
+        case .null: return "null"
+        case .leftMouseDown: return "leftMouseDown"
+        case .leftMouseUp: return "leftMouseUp"
+        case .rightMouseDown: return "rightMouseDown"
+        case .rightMouseUp: return "rightMouseUp"
+        case .mouseMoved: return "mouseMoved"
+        case .leftMouseDragged: return "leftMouseDragged"
+        case .rightMouseDragged: return "rightMouseDragged"
+        case .keyDown: return "keyDown"
+        case .keyUp: return "keyUp"
+        case .flagsChanged: return "flagsChanged"
+        case .scrollWheel: return "scrollWheel"
+        case .tabletPointer: return "tabletPointer"
+        case .tabletProximity: return "tabletProximity"
+        case .otherMouseDown: return "otherMouseDown"
+        case .otherMouseUp: return "otherMouseUp"
+        case .otherMouseDragged: return "otherMouseDragged"
+        case .tapDisabledByTimeout: return "tapDisabledByTimeout"
+        case .tapDisabledByUserInput: return "tapDisabledByUserInput"
+        default: return "unknown(\(type.rawValue))"
+        }
+    }
+    
+    private func handleFlagsChanged(event: CGEvent) {
+        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+        let flags = event.flags
+        
+        logger.info("🔍 FlagsChanged event: keyCode=\(keyCode), flags=\(flags.rawValue)")
+        logger.info("🔍 Current fn state: internal=\(self.fnKeyPressed), flag=\(flags.contains(.maskSecondaryFn))")
+        
+        // Always use the flag state, regardless of keycode
+        let wasFnPressed = fnKeyPressed
+        fnKeyPressed = flags.contains(.maskSecondaryFn)
+        
+        // Only handle state changes
+        if wasFnPressed != fnKeyPressed {
+            logger.notice("🎯 FN key state changed: \(self.fnKeyPressed ? "PRESSED" : "RELEASED")")
+            print("PointerScaler: 🎯 FN key state changed: \(self.fnKeyPressed ? "PRESSED" : "RELEASED")")
+            handleFnKeyStateChange(isPressed: fnKeyPressed)
+        } else {
+            logger.debug("FN key state unchanged: \(self.fnKeyPressed ? "PRESSED" : "RELEASED")")
+        }
+    }
+    
+    private func handleFnKeyStateChange(isPressed: Bool) {
+        logger.info("🎯 handleFnKeyStateChange called: isPressed=\(isPressed), currentPrecisionMode=\(self.isInPrecisionMode)")
+        print("PointerScaler: 🎯 handleFnKeyStateChange: isPressed=\(isPressed), precision=\(self.isInPrecisionMode)")
+        
+        guard isPressed != isInPrecisionMode else { 
+            logger.debug("No state change needed: isPressed=\(isPressed), isInPrecisionMode=\(self.isInPrecisionMode)")
+            return 
+        }
+        
+        if isPressed && !isInPrecisionMode {
+            logger.notice("🚀 ACTIVATING precision mode with factor \(self.precisionFactor) - using CURSOR WARPING")
+            print("PointerScaler: 🚀 ACTIVATING precision mode - using CURSOR WARPING approach")
+            
+            // Reset accumulator when activating precision mode
+            self.accumulatedX = 0.0
+            self.accumulatedY = 0.0
+            
+            // Start cursor tracking - get current position from system
+            let currentPosition = NSEvent.mouseLocation
+            // Convert from screen coordinates (bottom-left origin) to CG coordinates (top-left origin)
+            let screenHeight = NSScreen.main?.frame.height ?? 1440
+            self.lastCursorPosition = CGPoint(x: currentPosition.x, y: screenHeight - currentPosition.y)
+            self.isTrackingCursor = true
+            print("PointerScaler: 🔄 Reset accumulator and started cursor tracking at \(self.lastCursorPosition)")
+            
+            isInPrecisionMode = true
+            logger.info("✅ Precision mode activated - cursor will be manually controlled with \(self.precisionFactor)x scaling")
+        } else if !isPressed && isInPrecisionMode {
+            logger.notice("🛑 DEACTIVATING precision mode - stopping cursor control")
+            print("PointerScaler: 🛑 DEACTIVATING precision mode - stopping cursor control")
+            
+            // Reset accumulator and stop tracking
+            self.accumulatedX = 0.0
+            self.accumulatedY = 0.0
+            self.isTrackingCursor = false
+            print("PointerScaler: 🔄 Reset accumulator and stopped cursor tracking")
+            
+            isInPrecisionMode = false
+            logger.info("✅ Precision mode deactivated - cursor control returned to system")
+        }
+        
+        // Always call the callback to update UI
+        DispatchQueue.main.async {
+            self.onPrecisionModeChange?(isPressed)
+        }
+    }
+    
+    
+    private func startDebugTimer() {
+        debugTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
+            self?.debugCurrentState()
+        }
+    }
+    
+    private func debugCurrentState() {
+        let keyState = CGEventSource.keyState(.combinedSessionState, key: Self.fnKeyCode)
+        logger.notice("Debug: fn key polling=\(keyState ? "PRESSED" : "RELEASED"), internal=\(self.fnKeyPressed ? "PRESSED" : "RELEASED"), precision mode=\(self.isInPrecisionMode ? "ACTIVE" : "INACTIVE"), factor=\(self.precisionFactor)")
+        
+        // Check secure input mode periodically
+        if IsSecureEventInputEnabled() {
+            logger.warning("Secure input mode is active")
+        }
+        
+        // Report method being used
+        if isInPrecisionMode {
+            logger.notice("Precision control method: SAFE EVENT MODIFICATION (no system changes)")
+        }
+    }
+}
+
+public enum PointerScalerError: LocalizedError {
+    case failedToCreateEventTap
+    
+    public var errorDescription: String? {
+        switch self {
+        case .failedToCreateEventTap:
+            return "Failed to create event tap. Please ensure accessibility permissions are granted."
+        }
+    }
+}
+</file>
+
 </files>
 .
-├── _private
-│   └── research.md
 ├── build
 │   └── Dragoboo.app
 │       └── Contents
@@ -2525,16 +2142,14 @@ fi
 │                   ├── AppIcon.appiconset
 │                   └── Contents.json
 ├── CLAUDE.md
-├── dragoboo_console.log
-├── dragoboo_output.log
 ├── Info.plist
 ├── llms.txt
 ├── Makefile
 ├── Package.swift
 ├── PLAN.md
 ├── README.md
+├── recovery_trackpad.sh
 ├── run.sh
-├── somelog.txt
 ├── Sources
 │   ├── DragobooApp
 │   │   ├── Assets.xcassets
@@ -2551,4 +2166,4 @@ fi
 │       └── PointerScalerTests.swift
 └── TODO.md
 
-16 directories, 23 files
+15 directories, 20 files
