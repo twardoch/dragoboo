@@ -1,39 +1,44 @@
 # TODO.md
 
-## Cleanup
+## ✅ COMPLETED: UI Fixes v2.1
 
-Analyze `llms.txt`, and analyze and revise `PLAN.md`: 
+All requested UI issues have been resolved:
 
-  - Rewrite `README.md` to include extensive documentation that explains exactly how the app works technically, and how to use it. 
+### ✅ Fixed Issues:
 
-  - From `PLAN.md`, completely remove things that are done. 
+- **✅ Slider Range Corrected**: Changed from 0-200% to 1-100%, where 100% = normal speed and below 100% = slower
+- **✅ Slider Visibility**: Slider now always visible (affects drag acceleration's low-distance speed), modifier keys only show when slow speed is enabled
+- **✅ Drag Acceleration Alignment**: Label stays left-aligned when disabled by wrapping in HStack
+- **✅ Modifier Key Symbols**: Updated to use proper symbols: `fn`, `⌃`, `⌥`, `⌘`
+- **✅ Active Feedback**: Modifier key buttons now "light up" green when pressed, removed redundant status indicator
 
-## v2.0 Rewrite
+### 🔧 Technical Changes:
 
-Currently, the app slows down the mouse pointer by a customizable multiplier when I hold `fn` key. 
+- **Precision Factor**: Updated calculation to `100.0 / slowSpeedPercentage` (100% = factor 1.0)
+- **Default Value**: Changed default from 50% to 100% for intuitive normal speed
+- **UI Logic**: Always show slider, conditionally show modifier keys
+- **Visual Feedback**: Added real-time button highlighting for active modifier keys
+- **Layout**: Fixed alignment issues with proper HStack wrapping
 
-We want the following UI elements in the widget: 
+## 🔄 NEXT: Testing & Refinement
 
-The widget should have a width so that inside a horizontal slider should fit perfectly that is precisely 400 px wide  
+### Immediate Testing Tasks
 
-Section 1: Slow speed
+- [ ] Test percentage-based speed control across range (1%-100%)
+- [ ] Verify modifier key visual feedback works correctly
+- [ ] Test that slider affects drag acceleration when slow speed is disabled
+- [ ] Validate UI layout and alignment
+- [ ] Cross-test with different input devices (trackpad, mouse)
 
-- "Slow speed" slider should be 400 px wide, which is 100%. The pointer slowdown should be expressed by the % of the normal distance the pointer travels. So if the slider is at 50%, then it’s basically "2" in the older UI. 
+### Phase 2: Advanced Features (Future)
 
-- The "Slow move" button set lets me choose the modifiers that temporarily activate the slow speed: a series of "fn", "ctrl", "opt", "cmd" buttons, and the user can choose which ones are the modifier combo that activates slow move.
+- [ ] Fine-tune drag acceleration curve for optimal UX
+- [ ] Performance optimization for complex modifier combinations
+- [ ] Enhanced visual feedback for drag acceleration state
 
-Setion 2: Drag acceleration
+### Documentation Updates
 
-When I start dragging (that is, I press-and-hold the button and I start moving the pointer), our app should modify the pointer speed based on the combo of "Slow speed" slider and "Drag acceleration" slider. 
-
-The "Drag acceleration" slider should also be 400 px wide, which is actually 400 px. This slider controls the "acceleration radius" of the pointer. 
-
-So when I start dragging, the pointer speed is the "Slow speed" (customized % of normal speed) but if I have dragged for the distance specified by the "Drag acceleration" slider, then the pointer speed catches up to the normal speed. The acceleration is non-linear, such that near the start of the drag, the pointer speed increases slowly, but as I drag further, the pointer speed increases faster. 
-
-Finally, a Quit button on the right. 
-
-Think of a very good a logical UI for it. Think and re-think the above design, think of a good structure. The UI should also be minimal and compact, clear without much on-screen text and clutter. 
-
----
-
-Now: Think about all the instructions above, and then adjust the `PLAN.md` document. Remove all items that are "done", and then write a detailed spec for a junior dev that outlines exactly how the rewrite needs to be done. Include annotated code samples, include rationale. Don't actually write any code yet, just review, revise, think, double-check, review, revise again — all inside the `PLAN.md` document. 
+- [ ] Update README.md with v2.1 features
+- [ ] Document new configuration behavior
+- [ ] Update usage instructions
+- [ ] Add troubleshooting for new features

@@ -1,36 +1,26 @@
 import SwiftUI
+import DragobooCore
 
 struct ContentView: View {
     @EnvironmentObject var appState: AppState
     @Environment(\.dismiss) private var dismiss
     
     var body: some View {
-        VStack(spacing: 20) {
+        VStack(spacing: 16) {
             if !appState.isAccessibilityGranted {
                 AccessibilityRequestView()
             } else {
-                PrecisionSettingsView()
-            }
-            
-            Divider()
-            
-            HStack {
-                Button("Quit") {
-                    NSApplication.shared.terminate(nil)
-                }
-                .keyboardShortcut("q", modifiers: .command)
-                
-                Spacer()
-                
-                if appState.isAccessibilityGranted {
-                    StatusIndicator()
+                VStack(spacing: 12) {
+                    SlowSpeedToggleView()
+                    DragAccelerationToggleView()
+                    BottomSection()
                 }
             }
         }
         .onAppear { 
             appState.refreshPermissions() 
         }
-        .padding()
+        .padding(16)
         .frame(width: 300)
     }
 }
@@ -60,62 +50,139 @@ struct AccessibilityRequestView: View {
     }
 }
 
-struct PrecisionSettingsView: View {
+struct SlowSpeedToggleView: View {
     @EnvironmentObject var appState: AppState
-    @State private var sliderValue: Double = 4.0
+    @State private var slowSpeedPercentage: Double = 100.0
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Precision Settings")
-                .font(.headline)
-            
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Slowdown Factor:")
-                    Spacer()
-                    Text("\(Int(sliderValue))×")
-                        .monospacedDigit()
-                        .foregroundColor(.secondary)
-                }
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Toggle("Slow speed", isOn: Binding(
+                    get: { appState.slowSpeedEnabled },
+                    set: { _ in appState.toggleSlowSpeed() }
+                ))
+                .toggleStyle(.checkbox)
                 
-                Slider(value: $sliderValue, in: 1...10, step: 1) { _ in
-                    appState.updatePrecisionFactor(sliderValue)
-                }
-                .onAppear {
-                    sliderValue = appState.precisionFactor
+                Spacer()
+                
+                if appState.slowSpeedEnabled {
+                    ModifierKeyButtons()
                 }
             }
             
-            VStack(alignment: .leading, spacing: 4) {
-                Label("Hold fn key to activate precision mode", systemImage: "keyboard")
+            // Always show slider since it affects drag acceleration too
+            VStack(spacing: 4) {
+                Slider(value: $slowSpeedPercentage, in: 1...100, step: 5) { _ in
+                    appState.updateSlowSpeedPercentage(slowSpeedPercentage)
+                }
+                
+                Text("\(Int(slowSpeedPercentage))%")
                     .font(.caption)
                     .foregroundColor(.secondary)
                 
-                Label(
-                    appState.isPrecisionModeActive ? "Precision mode active" : " ",
-                    systemImage: appState.isPrecisionModeActive ? "checkmark.circle.fill" : "circle"
-                )
-                .font(.caption)
-                .foregroundColor(appState.isPrecisionModeActive ? .green : .clear)
-                
-
+                if appState.slowSpeedEnabled && appState.modifierKeys.isEmpty {
+                    Text("Select modifier keys to activate")
+                        .font(.caption2)
+                        .foregroundColor(.orange)
+                }
+            }
+            .onAppear {
+                slowSpeedPercentage = appState.slowSpeedPercentage
             }
         }
     }
 }
 
-struct StatusIndicator: View {
+struct ModifierKeyButtons: View {
     @EnvironmentObject var appState: AppState
     
     var body: some View {
         HStack(spacing: 4) {
-            Circle()
-                .fill(appState.isPrecisionModeActive ? .green : .gray)
-                .frame(width: 8, height: 8)
+            ForEach(ModifierKey.allCases, id: \.self) { key in
+                Button(key.displayName) {
+                    appState.toggleModifierKey(key)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+                .background(buttonBackground(for: key))
+                .foregroundColor(buttonForeground(for: key))
+                .cornerRadius(3)
+            }
+        }
+    }
+    
+    private func buttonBackground(for key: ModifierKey) -> Color {
+        let isSelected = appState.modifierKeys.contains(key)
+        let isActive = appState.isPrecisionModeActive && isSelected
+        
+        if isActive {
+            return .green
+        } else if isSelected {
+            return .accentColor
+        } else {
+            return .clear
+        }
+    }
+    
+    private func buttonForeground(for key: ModifierKey) -> Color {
+        let isSelected = appState.modifierKeys.contains(key)
+        return isSelected ? .white : .primary
+    }
+}
+
+struct DragAccelerationToggleView: View {
+    @EnvironmentObject var appState: AppState
+    @State private var accelerationRadius: Double = 200.0
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Toggle("Drag acceleration", isOn: Binding(
+                    get: { appState.dragAccelerationEnabled },
+                    set: { _ in appState.toggleDragAcceleration() }
+                ))
+                .toggleStyle(.checkbox)
+                
+                Spacer()
+            }
             
-            Text(appState.isPrecisionModeActive ? "Active" : "Ready")
+            if appState.dragAccelerationEnabled {
+                VStack(spacing: 4) {
+                    Slider(value: $accelerationRadius, in: 50...1000, step: 50) { _ in
+                        appState.updateAccelerationRadius(accelerationRadius)
+                    }
+                    
+                    Text("\(Int(accelerationRadius))px")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    
+                    Text("Speed increases from slow to normal over this distance")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                .onAppear {
+                    accelerationRadius = appState.accelerationRadius
+                }
+            }
+        }
+    }
+}
+
+struct BottomSection: View {
+    @EnvironmentObject var appState: AppState
+    
+    var body: some View {
+        HStack {
+            Text("Dragoboo v2.0.0")
                 .font(.caption)
                 .foregroundColor(.secondary)
+            
+            Spacer()
+            
+            Button("Quit") {
+                NSApplication.shared.terminate(nil)
+            }
+            .keyboardShortcut("q", modifiers: .command)
         }
     }
 }
