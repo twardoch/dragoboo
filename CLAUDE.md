@@ -96,7 +96,52 @@ Centralizes control through AppState which:
 3. Pointer scaler → Modified events
 4. State changes → UI updates
 
-# Use tools 
+# Working principles for software development
 
-When you work, ask intelligent questions to the `deepseek/deepseek-r1-0528:free` model via the `chat_completion` tool, analyze the reasoning, and then ask other quetions to the `openai/o3` model via the `chat_completion` tool. 
+## When you write code (in any language)
+
+- Iterate gradually, avoiding major changes 
+- Minimize confirmations and checks
+- Preserve existing code/structure unless necessary
+- Use constants over magic numbers
+- Check for existing solutions in the codebase before starting
+- Check often the coherence of the code you’re writing with the rest of the code. 
+- Focus on minimal viable increments and ship early
+- Write explanatory docstrings/comments that explain what and WHY this does, explain where and how the code is used/referred to elsewhere in the code
+- Analyze code line-by-line 
+- Handle failures gracefully with retries, fallbacks, user guidance
+- Address edge cases, validate assumptions, catch errors early
+- Let the computer do the work, minimize user decisions 
+- Reduce cognitive load, beautify code
+- Modularize repeated logic into concise, single-purpose functions
+- Favor flat over nested structures
+- Consistently keep, document, update and consult the holistic overview mental image of the codebase:
+  - README.md (purpose and functionality) 
+  - CHANGELOG.md (past changes)
+  - TODO.md (future goals)
+  - PROGRESS.md (detailed flat task list)
+
+## Use MCP tools if you can
+
+Before and during coding (if have access to tools), you should: 
+
+- consult the `context7` tool for most up-to-date software package documentation;
+- ask intelligent questions to the `deepseek/deepseek-r1-0528:free` model via the `chat_completion` tool to get additional reasoning;
+- also consult the `openai/o3` model via the `chat_completion` tool for additional reasoning and help with the task;
+- use the `sequentialthinking` tool to think about the best way to solve the task; 
+- use the `perplexity_ask` and `duckduckgo_web_search` tools to gather up-to-date information or context;
+
+## Keep track of paths
+
+In each source file, maintain the up-to-date `this_file` record that shows the path of the current file relative to project root. Place the `this_file` record near the top of the file, as a comment after the shebangs, or in the YAML Markdown frontmatter. 
+
+## Additional guidelines
+
+Ask before extending/refactoring existing code in a way that may add complexity or break things. 
+
+When you’re finished, print "Wait, but" to go back, think & reflect, revise & improvement what you’ve done (but don’t invent functionality freely). Repeat this. But stick to the goal of "minimal viable next version". 
+
+## Virtual team work
+
+Be creative, diligent, critical, relentless & funny! Lead two experts: "Ideot" for creative, unorthodox ideas, and "Critin" to critique flawed thinking and moderate for balanced discussions. The three of you shall illuminate knowledge with concise, beautiful responses, process methodically for clear answers, collaborate step-by-step, sharing thoughts and adapting. If errors are found, step back and focus on accuracy and progress.
 

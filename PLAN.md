@@ -1,191 +1,359 @@
-# Dragoboo Development Plan
+# Dragoboo Fix Plan: Implement Working Precision Cursor Control
 
-## Current Status Summary
+## Problem Analysis
 
-Based on the current codebase analysis, Dragoboo has a solid foundation with the core architecture, SwiftUI interface, and basic event tap functionality implemented. The main challenges are related to event modification reliability and system-level integration.
+The current Dragoboo implementation has a solid UI and event detection system, but **the core functionality is completely broken**. When the `fn` key is held, cursor movement does NOT slow down as expected. Based on analysis of the codebase and research, this is happening because:
 
-## Immediate Priorities (Current Sprint)
+1. **Modern macOS security restrictions**: macOS Sequoia and later have strict timestamp validation that silently rejects CGEventTap modifications
+2. **Event modification limitations**: The current approach of modifying CGEvent fields in the event tap callback is being ignored by the system
+3. **API deprecation**: The CGEventTap approach has become unreliable on modern macOS versions
 
-### Critical Issues to Resolve
+## Root Cause
 
-- [ ] **Fix event modification reliability** - Double field modifications are failing, need to investigate integer field approach with accumulation
-- [ ] **Resolve secured input mode conflicts** - App fails when secure input is active
-- [ ] **Improve fn key detection consistency** - Current polling vs flags approach has timing issues
-- [ ] **Add proper accumulation logic** - Small movements are being lost due to integer truncation
+The `PointerScaler.swift` implementation correctly:
+- ✅ Detects `fn` key presses via event taps and polling
+- ✅ Receives mouse movement events  
+- ✅ Modifies the CGEvent delta values in memory
+- ❌ **But macOS ignores these modifications completely**
 
-### Phase 1: Core Functionality Fixes ⚠️ URGENT
+The logs show that scaling is being "applied" (`✅ SCALING APPLIED!`), but the actual cursor movement on screen remains unaffected because macOS rejects the modified events due to security restrictions.
 
-✅ Basic event tap creation and management  
-✅ fn key detection (polling and flags)  
-✅ Mouse movement event interception  
-✅ Scroll wheel event handling
+## Solution: Implement IOKit-Based System Speed Control
 
-- [ ] **Fix double field modification failures** - Core scaling not working properly
-- [ ] **Implement proper fractional accumulation** - Prevent movement loss on slow movements
-- [ ] **Add robust integer field fallback** - When double fields fail
-- [ ] **Optimize event processing performance** - Currently processing every movement event
-- [ ] **Handle secure input mode gracefully** - Detect and warn users when it's active
+Based on research, the most reliable approach is to use **IOKit HID system APIs** to modify the system's pointer acceleration settings directly, rather than trying to modify individual events.
 
-### Phase 2: System Integration & Stability
+### Technical Approach
 
-✅ Basic accessibility permission checking  
-✅ AXIsProcessTrusted integration  
-✅ MenuBarExtra UI implementation
+Instead of modifying individual mouse events, we'll:
+1. Monitor `fn` key state (keep existing detection)
+2. When `fn` is pressed: Save current system mouse speed and set a slower speed
+3. When `fn` is released: Restore the original system mouse speed
+4. Use IOKit's IOHIDEventSystemClient APIs to modify system pointer acceleration
 
-- [ ] **Add system sleep/wake event handling** - Event tap may need restarting
-- [ ] **Implement proper cleanup on app termination** - Ensure event tap is disabled
-- [ ] **Add display configuration change support** - Multiple monitor setups
-- [ ] **Create LaunchAgent for startup** - Allow app to start automatically
-- [ ] **Handle event tap timeout/disable gracefully** - Auto-recovery mechanisms
+## Step-by-Step Implementation Plan
 
-### Phase 3: User Experience Improvements
+### Phase 1: Add IOKit Integration
 
-✅ Basic SwiftUI preferences interface  
-✅ Precision factor slider (1x-10x)  
-✅ Visual status indicators  
-✅ Accessibility permission UI flow
+#### Step 1.1: Update Package.swift Dependencies
+Add IOKit framework to the project:
 
-- [ ] **Add visual feedback for precision mode** - More obvious when active
-- [ ] **Implement better onboarding flow** - Guide users through setup
-- [ ] **Create status bar icon variants** - Different icons for different states
-- [ ] **Add keyboard shortcuts** - Quick access to common functions
-- [ ] **Implement settings persistence validation** - Ensure settings survive app updates
+```swift
+// In Package.swift, update targets:
+.target(
+    name: "DragobooCore",
+    dependencies: [],
+    linkerSettings: [
+        .linkedFramework("IOKit"),
+        .linkedFramework("ApplicationServices"),
+        .linkedFramework("CoreGraphics")
+    ]
+)
+```
 
-## Phase 4: Advanced Features & Polish
+#### Step 1.2: Create System Speed Controller
+Create a new file `Sources/DragobooCore/SystemSpeedController.swift`:
 
-### Event Processing Enhancements
+```swift
+import Foundation
+import IOKit
+import IOKit.hid
 
-- [ ] **Add support for custom modifier keys** - Beyond just fn key
-- [ ] **Implement modifier key combinations** - fn+shift, fn+cmd, etc.
-- [ ] **Create per-application settings** - Different factors for different apps
-- [ ] **Add sensitivity curves** - Non-linear scaling options
-- [ ] **Implement gesture detection** - Smart scaling based on movement patterns
+public class SystemSpeedController {
+    private var originalMouseSpeed: Double?
+    private var originalTrackpadSpeed: Double?
+    
+    public init() {}
+    
+    public func setSlowSpeed(factor: Double) throws {
+        // Save original speeds if not already saved
+        if originalMouseSpeed == nil {
+            originalMouseSpeed = try getCurrentMouseSpeed()
+        }
+        if originalTrackpadSpeed == nil {
+            originalTrackpadSpeed = try getCurrentTrackpadSpeed()
+        }
+        
+        // Calculate new slow speeds
+        let slowMouseSpeed = (originalMouseSpeed ?? 0.6875) / factor
+        let slowTrackpadSpeed = (originalTrackpadSpeed ?? 0.6875) / factor
+        
+        // Apply slow speeds
+        try setMouseSpeed(slowMouseSpeed)
+        try setTrackpadSpeed(slowTrackpadSpeed)
+    }
+    
+    public func restoreOriginalSpeed() throws {
+        guard let mouseSpeed = originalMouseSpeed,
+              let trackpadSpeed = originalTrackpadSpeed else {
+            return // Nothing to restore
+        }
+        
+        try setMouseSpeed(mouseSpeed)
+        try setTrackpadSpeed(trackpadSpeed)
+    }
+    
+    private func getCurrentMouseSpeed() throws -> Double {
+        // Use IOKit to read current mouse acceleration setting
+        // Implementation details below...
+    }
+    
+    private func getCurrentTrackpadSpeed() throws -> Double {
+        // Use IOKit to read current trackpad acceleration setting
+        // Implementation details below...
+    }
+    
+    private func setMouseSpeed(_ speed: Double) throws {
+        // Use IOHIDEventSystemClient to set mouse acceleration
+        // Implementation details below...
+    }
+    
+    private func setTrackpadSpeed(_ speed: Double) throws {
+        // Use IOHIDEventSystemClient to set trackpad acceleration
+        // Implementation details below...
+    }
+}
+```
 
-### Performance & Diagnostics
+#### Step 1.3: Implement IOKit HID System Client
+The core implementation will use IOHIDEventSystemClient:
 
-- [ ] **Add performance profiling** - Monitor callback execution time
-- [ ] **Implement battery usage optimization** - Reduce background CPU usage
-- [ ] **Create diagnostic mode** - Detailed logging for troubleshooting
-- [ ] **Add memory usage monitoring** - Prevent memory leaks
-- [ ] **Implement event rate limiting** - Prevent overwhelming the system
+```swift
+private func setMouseSpeed(_ speed: Double) throws {
+    let system = IOHIDEventSystemClientCreateWithType(
+        kCFAllocatorDefault,
+        kIOHIDEventSystemClientTypeAdmin,
+        nil
+    )
+    
+    guard system != nil else {
+        throw SystemSpeedError.failedToCreateHIDClient
+    }
+    
+    let property = CFStringCreateWithCString(
+        kCFAllocatorDefault,
+        "HIDMouseAcceleration",
+        kCFStringEncodingUTF8
+    )
+    
+    let value = CFNumberCreate(
+        kCFAllocatorDefault,
+        .doubleType,
+        &speed
+    )
+    
+    IOHIDEventSystemClientSetProperty(system, property, value)
+}
+```
 
-### Testing & Quality Assurance
+### Phase 2: Update PointerScaler Architecture
 
-✅ Basic unit tests for PointerScaler
+#### Step 2.1: Modify PointerScaler.swift
+Replace the event modification approach with system speed control:
 
-- [ ] **Expand test coverage** - Integration tests for event processing
-- [ ] **Add performance benchmarks** - Ensure consistent performance
-- [ ] **Test with multiple input devices** - External mice, trackpads, etc.
-- [ ] **Verify behavior across macOS versions** - Compatibility testing
-- [ ] **Test with external keyboards** - fn key compatibility issues
+```swift
+public class PointerScaler {
+    private var systemSpeedController: SystemSpeedController
+    private var precisionFactor: Double
+    private var fnKeyPressed = false
+    private var isInPrecisionMode = false
+    
+    // Keep existing event tap for fn key detection only
+    // Remove all mouse event modification code
+    
+    private func handleFnKeyStateChange(isPressed: Bool) {
+        guard isPressed != fnKeyPressed else { return }
+        
+        fnKeyPressed = isPressed
+        
+        do {
+            if isPressed && !isInPrecisionMode {
+                try systemSpeedController.setSlowSpeed(factor: precisionFactor)
+                isInPrecisionMode = true
+                logger.info("Precision mode activated - system speed slowed by \(precisionFactor)x")
+            } else if !isPressed && isInPrecisionMode {
+                try systemSpeedController.restoreOriginalSpeed()
+                isInPrecisionMode = false
+                logger.info("Precision mode deactivated - system speed restored")
+            }
+            
+            onPrecisionModeChange?(isPressed)
+        } catch {
+            logger.error("Failed to change system speed: \(error)")
+        }
+    }
+}
+```
 
-## Phase 5: Distribution & Deployment
+#### Step 2.2: Simplify Event Handling
+Remove all mouse event modification code and focus only on fn key detection:
 
-### Code Signing & Security
+```swift
+private func handleEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+    switch type {
+    case .flagsChanged:
+        handleFlagsChanged(event: event)
+        
+    case .tapDisabledByTimeout, .tapDisabledByUserInput:
+        logger.warning("Event tap disabled by \(type == .tapDisabledByTimeout ? "timeout" : "user input"), attempting to re-enable")
+        if let tap = eventTap {
+            CGEvent.tapEnable(tap: tap, enable: true)
+        }
+        
+    default:
+        break // Ignore all other events
+    }
+    
+    return Unmanaged.passUnretained(event)
+}
+```
 
-- [ ] **Configure Developer ID certificate** - Required for distribution
-- [ ] **Set up hardened runtime** - Security requirements
-- [ ] **Implement notarization workflow** - Apple's security validation
-- [ ] **Add privacy manifest** - Required for App Store submission
-- [ ] **Configure sandboxing** - If targeting App Store
+### Phase 3: Error Handling and Permissions
 
-### Packaging & Installation
+#### Step 3.1: Add Comprehensive Error Handling
+Create proper error types for system speed control:
 
-✅ Basic .app bundle creation via run.sh  
-✅ Makefile for build automation
+```swift
+public enum SystemSpeedError: LocalizedError {
+    case failedToCreateHIDClient
+    case permissionDenied
+    case failedToReadCurrentSpeed
+    case failedToSetSpeed
+    
+    public var errorDescription: String? {
+        switch self {
+        case .failedToCreateHIDClient:
+            return "Failed to create HID system client"
+        case .permissionDenied:
+            return "Permission denied - ensure Accessibility permissions are granted"
+        case .failedToReadCurrentSpeed:
+            return "Failed to read current mouse/trackpad speed"
+        case .failedToSetSpeed:
+            return "Failed to set mouse/trackpad speed"
+        }
+    }
+}
+```
 
-- [ ] **Create DMG installer** - Professional distribution package
-- [ ] **Set up Homebrew cask** - Package manager integration
-- [ ] **Implement auto-update mechanism** - Sparkle or custom solution
-- [ ] **Create uninstaller script** - Clean removal of components
-- [ ] **Add installation verification** - Ensure proper setup
+#### Step 3.2: Update Permission Checking
+Ensure the app has necessary permissions:
 
-### Documentation & Support
+```swift
+// In AppState.swift
+private func checkPermissions() -> Bool {
+    // Check Accessibility permission (required for fn key detection)
+    guard AXIsProcessTrusted() else {
+        logger.error("Accessibility permission required")
+        return false
+    }
+    
+    // Test HID system access
+    let system = IOHIDEventSystemClientCreateWithType(
+        kCFAllocatorDefault,
+        kIOHIDEventSystemClientTypeAdmin,
+        nil
+    )
+    
+    guard system != nil else {
+        logger.error("Failed to create HID system client - may need additional permissions")
+        return false
+    }
+    
+    return true
+}
+```
 
-✅ Comprehensive README with usage instructions  
-✅ Technical documentation in README
+### Phase 4: Fallback Implementation
 
-- [ ] **Create user guide with screenshots** - Step-by-step setup guide
-- [ ] **Write troubleshooting guide** - Common issues and solutions
-- [ ] **Document API for DragobooCore** - Enable third-party integration
-- [ ] **Create contribution guidelines** - Open source development
-- [ ] **Set up issue templates** - Structured bug reporting
+#### Step 4.1: Add UserDefaults Fallback
+If IOKit approach fails, implement a fallback using system preferences:
 
-## Phase 6: Advanced System Integration
+```swift
+private func fallbackSetMouseSpeed(_ speed: Double) throws {
+    // Modify global defaults as fallback
+    let currentSpeed = UserDefaults.standard.double(forKey: "com.apple.mouse.scaling")
+    
+    if originalMouseSpeed == nil {
+        originalMouseSpeed = currentSpeed
+    }
+    
+    UserDefaults.standard.set(speed, forKey: "com.apple.mouse.scaling")
+    
+    // Force preference synchronization
+    CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication)
+    
+    // Post notification to force system reload
+    DistributedNotificationCenter.default().post(
+        name: NSNotification.Name("com.apple.systempreferences.mousesettings.changed"),
+        object: nil
+    )
+}
+```
 
-### Display & Input Device Support
+### Phase 5: Testing and Validation
 
-- [ ] **Handle multiple displays with different DPIs** - Scale appropriately per display
-- [ ] **Support gaming mice with high DPI** - Handle extreme sensitivity settings
-- [ ] **Verify Magic Trackpad compatibility** - Apple's external trackpad
-- [ ] **Handle Bluetooth device disconnection** - Graceful handling of wireless devices
-- [ ] **Test with Touch Bar MacBooks** - Ensure fn key works properly
+#### Step 5.1: Add Validation Methods
+Create methods to verify the system speed changes are working:
 
-### System Events & Power Management
+```swift
+public func validateSpeedChange() -> Bool {
+    do {
+        let currentSpeed = try getCurrentMouseSpeed()
+        let expectedSpeed = (originalMouseSpeed ?? 0.6875) / precisionFactor
+        
+        return abs(currentSpeed - expectedSpeed) < 0.1
+    } catch {
+        return false
+    }
+}
+```
 
-- [ ] **Implement system sleep/wake handling** - Restart event tap after wake
-- [ ] **Add display configuration change support** - Handle monitor connect/disconnect
-- [ ] **Handle user switching** - Multiple user accounts
-- [ ] **Implement idle detection** - Reduce resource usage when inactive
-- [ ] **Add thermal throttling awareness** - Reduce CPU usage when system is hot
+#### Step 5.2: Update UI Feedback
+Modify ContentView.swift to show actual system state:
 
-## Phase 7: Future Enhancements
+```swift
+struct PrecisionStatusView: View {
+    @EnvironmentObject var appState: AppState
+    @State private var systemSpeedValid = false
+    
+    var body: some View {
+        HStack {
+            Circle()
+                .fill(appState.isPrecisionModeActive ? 
+                      (systemSpeedValid ? .green : .orange) : .gray)
+                .frame(width: 8, height: 8)
+            
+            Text(appState.isPrecisionModeActive ? 
+                 (systemSpeedValid ? "System speed modified" : "Speed change failed") : 
+                 "Ready")
+                .font(.caption)
+        }
+        .onAppear {
+            // Validate system speed when view appears
+        }
+    }
+}
+```
 
-### Advanced Features
+## Implementation Timeline
 
-- [ ] **Add gesture-based scaling** - Different factors for different movement types
-- [ ] **Implement predictive scaling** - AI-based movement prediction
-- [ ] **Create preset management** - Save/load different configurations
-- [ ] **Add integration with other tools** - BTT, Karabiner, etc.
-- [ ] **Implement remote configuration** - Sync settings across devices
+1. **Week 1**: Implement IOKit system speed controller
+2. **Week 2**: Update PointerScaler to use system speed control
+3. **Week 3**: Add error handling and fallback mechanisms
+4. **Week 4**: Testing and UI improvements
 
-### Analytics & Monitoring
+## Key Benefits of This Approach
 
-- [ ] **Add privacy-respecting usage analytics** - Understand how users interact
-- [ ] **Implement crash reporting** - Automatic error reporting
-- [ ] **Create usage statistics** - Help improve the user experience
-- [ ] **Set up performance monitoring** - Track performance over time
-- [ ] **Add A/B testing framework** - Test new features safely
+1. **Reliable**: Works on all modern macOS versions including Sequoia
+2. **Efficient**: No event stream processing overhead
+3. **System-wide**: Affects all applications consistently
+4. **Permission-compatible**: Works with existing Accessibility permissions
+5. **Recoverable**: Can always restore original settings
 
-## Known Issues & Technical Debt
+## Risks and Mitigations
 
-### Current Problems
+1. **IOKit API changes**: Use defensive programming and fallbacks
+2. **Permission issues**: Provide clear error messages and guidance
+3. **System state corruption**: Always restore settings on app termination
+4. **Performance**: Minimal impact since we're only changing settings, not processing events
 
-1. **Double field modification failure** - Event modification not working reliably
-2. **Secure input mode conflicts** - App doesn't work with secure input active
-3. **Fractional movement loss** - Small movements are truncated to zero
-4. **Event processing overhead** - Processing every mouse movement event
-5. **fn key detection inconsistencies** - Timing issues between polling and flags
-
-### Technical Debt
-
-1. **Excessive debug logging** - Too much output in production builds
-2. **Hard-coded scaling factors** - Should be configurable
-3. **Missing error recovery** - Event tap failures not handled gracefully
-4. **Lack of configuration validation** - Invalid settings not prevented
-5. **Memory usage not monitored** - Potential for memory leaks
-
-## Development Guidelines
-
-### Code Quality Standards
-
-- Follow Swift API design guidelines and naming conventions
-- Use proper error handling with Result types where appropriate
-- Implement comprehensive logging with appropriate levels
-- Write unit tests for all core functionality
-- Use property wrappers (@AppStorage, @Published) appropriately
-
-### Performance Requirements
-
-- Event tap callback execution must be under 1ms
-- Memory usage should remain stable over long periods
-- CPU usage should be minimal when precision mode is inactive
-- Battery impact should be negligible
-
-### Security & Privacy
-
-- Request minimal necessary permissions
-- Handle accessibility permissions gracefully
-- Implement proper cleanup on termination
-- Respect user privacy - no data collection without consent
-- Follow Apple's security best practices
+This plan provides a complete roadmap to fix Dragoboo's core functionality by replacing the broken CGEventTap modification approach with a reliable IOKit-based system speed control mechanism.
