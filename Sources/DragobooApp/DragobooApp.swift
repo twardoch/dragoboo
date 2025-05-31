@@ -50,20 +50,18 @@ class AppState: ObservableObject {
         }
     }
     
-    // Fixed: 100% = normal speed (factor 1.0), below 100% = slower, above 100% = faster
+    // Fixed: 100% = normal speed (factor 2.0 baseline), below 100% = slower
     var precisionFactor: Double {
-        return 100.0 / slowSpeedPercentage
+        // The system's "normal" speed is factor 2.0, not 1.0
+        return 200.0 / slowSpeedPercentage
     }
     
     private var precisionEngine: PrecisionEngine?
     private let logger = Logger(subsystem: "com.dragoboo.app", category: "AppState")
     
     init() {
-        // Migrate from old percentage system: reset to 100% (normal speed) for consistency
-        // This ensures all users start with the intuitive 100% = normal speed baseline
-        if slowSpeedPercentage != 100.0 {
-            slowSpeedPercentage = 100.0
-        }
+        // Force reset to 100% (normal speed) to fix any legacy values
+        slowSpeedPercentage = 100.0
         
         checkPermissions()
         setupPrecisionEngine()

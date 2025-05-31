@@ -175,434 +175,6 @@ $END$
 }
 </file>
 
-<file path="Sources/DragobooCore/PrecisionEngine.swift">
-// this_file: Sources/DragobooCore/PrecisionEngine.swift
-
-import Foundation
-import CoreGraphics
-import ApplicationServices
-import AppKit
-import os
-
-public enum ModifierKey: String, CaseIterable, Codable {
-    case fn, control, option, command
-    
-    public var cgEventFlag: CGEventFlags {
-        switch self {
-        case .fn: return .maskSecondaryFn
-        case .control: return .maskControl
-        case .option: return .maskAlternate
-        case .command: return .maskCommand
-        }
-    }
-    
-    public var displayName: String {
-        switch self {
-        case .fn: return "fn"
-        case .control: return "⌃"
-        case .option: return "⌥"
-        case .command: return "⌘"
-        }
-    }
-}
-
-public class PrecisionEngine {
-    private var eventTap: CFMachPort?
-    private var runLoopSource: CFRunLoopSource?
-    private var precisionFactor: Double
-    private var fnKeyPressed = false
-    private var isInPrecisionMode = false
-    private let logger = Logger(subsystem: "com.dragoboo.core", category: "PrecisionEngine")
-    
-    // Movement accumulator for precise fractional scaling
-    private var accumulatedX: Double = 0.0
-    private var accumulatedY: Double = 0.0
-    
-    // Cursor position tracking for manual control in precision mode
-    private var lastCursorPosition: CGPoint = .zero
-    
-    // v2.0: Configurable modifier keys
-    private var modifierKeys: Set<ModifierKey> = [.fn]
-    
-    // v2.0: Feature toggles
-    private var slowSpeedEnabled: Bool = true
-    private var dragAccelerationEnabled: Bool = true
-    
-    // v2.0: Drag acceleration settings
-    private var accelerationRadius: Double = 200.0
-    private var isDragging = false
-    private var currentDragDistance: Double = 0.0
-    
-    public var onPrecisionModeChange: ((Bool) -> Void)?
-    
-    private static let fnKeyCode: CGKeyCode = 0x3F
-    
-    public init(precisionFactor: Double) {
-        self.precisionFactor = precisionFactor
-    }
-    
-    public func start() throws {
-        logger.info("Starting precision engine...")
-        
-        // Reset state on start
-        fnKeyPressed = false
-        isInPrecisionMode = false
-        
-        // Check accessibility permissions first
-        guard AXIsProcessTrusted() else {
-            logger.error("Accessibility permissions not granted")
-            throw PrecisionEngineError.failedToCreateEventTap
-        }
-        
-        // Listen for relevant events: flags changed, mouse movement, scrolling, dragging, and mouse button events
-        let flagsChangedMask: CGEventMask = 1 << CGEventType.flagsChanged.rawValue
-        let mouseMovedMask: CGEventMask = 1 << CGEventType.mouseMoved.rawValue
-        let leftMouseDownMask: CGEventMask = 1 << CGEventType.leftMouseDown.rawValue
-        let leftMouseUpMask: CGEventMask = 1 << CGEventType.leftMouseUp.rawValue
-        let rightMouseDownMask: CGEventMask = 1 << CGEventType.rightMouseDown.rawValue
-        let rightMouseUpMask: CGEventMask = 1 << CGEventType.rightMouseUp.rawValue
-        let otherMouseDownMask: CGEventMask = 1 << CGEventType.otherMouseDown.rawValue
-        let otherMouseUpMask: CGEventMask = 1 << CGEventType.otherMouseUp.rawValue
-        let leftMouseDraggedMask: CGEventMask = 1 << CGEventType.leftMouseDragged.rawValue
-        let rightMouseDraggedMask: CGEventMask = 1 << CGEventType.rightMouseDragged.rawValue
-        let otherMouseDraggedMask: CGEventMask = 1 << CGEventType.otherMouseDragged.rawValue
-        let scrollWheelMask: CGEventMask = 1 << CGEventType.scrollWheel.rawValue
-        let tapDisabledByTimeoutMask: CGEventMask = 1 << CGEventType.tapDisabledByTimeout.rawValue
-        let tapDisabledByUserInputMask: CGEventMask = 1 << CGEventType.tapDisabledByUserInput.rawValue
-        
-        let eventMask: CGEventMask = flagsChangedMask | mouseMovedMask | leftMouseDownMask | leftMouseUpMask |
-                                     rightMouseDownMask | rightMouseUpMask | otherMouseDownMask | otherMouseUpMask |
-                                     leftMouseDraggedMask | rightMouseDraggedMask | otherMouseDraggedMask |
-                                     scrollWheelMask | tapDisabledByTimeoutMask | tapDisabledByUserInputMask
-        
-        let selfPointer = Unmanaged.passUnretained(self).toOpaque()
-        
-        // Create event tap at annotated session level for reliable event modification
-        guard let tap = CGEvent.tapCreate(
-            tap: .cgAnnotatedSessionEventTap,
-            place: .headInsertEventTap,
-            options: .defaultTap,
-            eventsOfInterest: eventMask,
-            callback: { proxy, type, event, userInfo in
-                guard let userInfo = userInfo else { 
-                    return Unmanaged.passUnretained(event) 
-                }
-                let engine = Unmanaged<PrecisionEngine>.fromOpaque(userInfo).takeUnretainedValue()
-                return engine.handleEvent(proxy: proxy, type: type, event: event)
-            },
-            userInfo: selfPointer
-        ) else {
-            logger.error("Failed to create event tap")
-            throw PrecisionEngineError.failedToCreateEventTap
-        }
-        
-        eventTap = tap
-        
-        // Create run loop source and add to main run loop
-        guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap!, 0) else {
-            logger.error("Failed to create run loop source")
-            CGEvent.tapEnable(tap: eventTap!, enable: false)
-            CFMachPortInvalidate(eventTap!)
-            throw PrecisionEngineError.failedToCreateEventTap
-        }
-        
-        runLoopSource = source
-        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
-        CGEvent.tapEnable(tap: eventTap!, enable: true)
-        
-        logger.info("Precision engine started successfully")
-    }
-    
-    public func stop() {
-        // Reset precision mode state
-        if isInPrecisionMode {
-            isInPrecisionMode = false
-            logger.info("Precision mode deactivated on stop")
-        }
-        
-        if let tap = eventTap {
-            CGEvent.tapEnable(tap: tap, enable: false)
-            CFMachPortInvalidate(tap)
-        }
-        
-        if let source = runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
-        }
-        
-        eventTap = nil
-        runLoopSource = nil
-        logger.info("Precision engine stopped")
-    }
-    
-    public func updatePrecisionFactor(_ factor: Double) {
-        precisionFactor = factor
-        logger.info("Updated precision factor to \(factor)")
-    }
-    
-    // v2.0: Update configurable modifier keys
-    public func updateModifierKeys(_ keys: Set<ModifierKey>) {
-        modifierKeys = keys
-        logger.info("Updated modifier keys: \(keys)")
-    }
-    
-    // v2.0: Update drag acceleration radius
-    public func updateAccelerationRadius(_ radius: Double) {
-        accelerationRadius = radius
-        logger.info("Updated acceleration radius: \(radius)")
-    }
-    
-    // v2.0: Update feature toggles
-    public func updateSlowSpeedEnabled(_ enabled: Bool) {
-        slowSpeedEnabled = enabled
-        logger.info("Slow speed enabled: \(enabled)")
-        
-        // If slow speed is disabled and we're in precision mode, deactivate it
-        if !enabled && isInPrecisionMode {
-            handleActivationStateChange(isPressed: false)
-        }
-    }
-    
-    public func updateDragAccelerationEnabled(_ enabled: Bool) {
-        dragAccelerationEnabled = enabled
-        logger.info("Drag acceleration enabled: \(enabled)")
-    }
-    
-    private func handleEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
-        switch type {
-        case .flagsChanged:
-            handleFlagsChanged(event: event)
-            
-        case .leftMouseDown, .rightMouseDown, .otherMouseDown:
-            if dragAccelerationEnabled {
-                startDragTracking(at: getCursorPosition())
-            }
-            
-        case .leftMouseUp, .rightMouseUp, .otherMouseUp:
-            if isDragging {
-                stopDragTracking()
-            }
-            
-        case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
-            let isDragEvent = type != .mouseMoved
-            let shouldModify = (isInPrecisionMode && slowSpeedEnabled) || (isDragEvent && isDragging && dragAccelerationEnabled)
-            if shouldModify {
-                return modifyMovementEvent(event: event, isDragEvent: isDragEvent)
-            }
-            
-        case .scrollWheel:
-            if isInPrecisionMode && slowSpeedEnabled {
-                return modifyScrollEvent(event: event)
-            }
-            
-        case .tapDisabledByTimeout, .tapDisabledByUserInput:
-            logger.warning("Event tap disabled, attempting to re-enable")
-            if let tap = self.eventTap {
-                CGEvent.tapEnable(tap: tap, enable: true)
-            }
-            
-        default:
-            break
-        }
-        
-        return Unmanaged.passUnretained(event)
-    }
-    
-    /// Intercepts mouse movement events and controls cursor movement for precision mode and drag acceleration
-    /// Uses accumulation algorithm to handle fractional movements properly
-    private func modifyMovementEvent(event: CGEvent, isDragEvent: Bool) -> Unmanaged<CGEvent>? {
-        // Get the movement delta - try both integer and double fields
-        let deltaXInt = event.getIntegerValueField(.mouseEventDeltaX)
-        let deltaYInt = event.getIntegerValueField(.mouseEventDeltaY)
-        let deltaXDouble = event.getDoubleValueField(.mouseEventDeltaX) 
-        let deltaYDouble = event.getDoubleValueField(.mouseEventDeltaY)
-        
-        // Use whichever has non-zero values
-        let deltaX = deltaXInt != 0 ? Double(deltaXInt) : deltaXDouble
-        let deltaY = deltaYInt != 0 ? Double(deltaYInt) : deltaYDouble
-        
-        // Skip if no movement
-        guard deltaX != 0 || deltaY != 0 else {
-            return Unmanaged.passUnretained(event)
-        }
-        
-        // Calculate effective precision factor with drag acceleration
-        let effectiveFactor = calculateEffectivePrecisionFactor(isDragging: isDragEvent)
-        
-        // Apply precision scaling with accumulation
-        accumulatedX += deltaX / effectiveFactor
-        accumulatedY += deltaY / effectiveFactor
-        
-        // Extract integer parts for the actual movement
-        let scaledX = Int(accumulatedX)
-        let scaledY = Int(accumulatedY)
-        
-        // Keep the fractional remainders for next time
-        accumulatedX -= Double(scaledX)
-        accumulatedY -= Double(scaledY)
-        
-        // Update drag distance if dragging
-        if isDragEvent && isDragging {
-            currentDragDistance += sqrt(Double(scaledX * scaledX + scaledY * scaledY))
-        }
-        
-        // For precision mode, use manual cursor warping with proper coordinate handling
-        if isInPrecisionMode && slowSpeedEnabled {
-            let newPosition = CGPoint(
-                x: lastCursorPosition.x + Double(scaledX),
-                y: lastCursorPosition.y + Double(scaledY)
-            )
-            
-            // Warp cursor to new position
-            let warpResult = CGWarpMouseCursorPosition(newPosition)
-            if warpResult == .success {
-                lastCursorPosition = newPosition
-            } else {
-                logger.error("Failed to warp cursor to position: \(newPosition.x), \(newPosition.y)")
-                return Unmanaged.passUnretained(event)
-            }
-            
-            // Consume the original event
-            return nil
-        } else {
-            // For drag acceleration without precision mode, modify event deltas
-            guard let modifiedEvent = event.copy() else {
-                logger.error("Failed to copy movement event")
-                return Unmanaged.passUnretained(event)
-            }
-            
-            modifiedEvent.setDoubleValueField(.mouseEventDeltaX, value: Double(scaledX))
-            modifiedEvent.setDoubleValueField(.mouseEventDeltaY, value: Double(scaledY))
-            
-            return Unmanaged.passRetained(modifiedEvent)
-        }
-    }
-    
-    /// Modifies scroll wheel events to slow them down when precision mode is active
-    private func modifyScrollEvent(event: CGEvent) -> Unmanaged<CGEvent>? {
-        // Get the scroll delta
-        let scrollDeltaY = event.getDoubleValueField(.scrollWheelEventDeltaAxis1)
-        let scrollDeltaX = event.getDoubleValueField(.scrollWheelEventDeltaAxis2)
-        
-        // Apply precision scaling (reduce scrolling by precision factor)
-        let scaledScrollY = scrollDeltaY / precisionFactor
-        let scaledScrollX = scrollDeltaX / precisionFactor
-        
-        // Create a new event with modified scroll deltas
-        guard let modifiedEvent = event.copy() else {
-            logger.error("Failed to copy scroll event")
-            return Unmanaged.passUnretained(event)
-        }
-        
-        modifiedEvent.setDoubleValueField(.scrollWheelEventDeltaAxis1, value: scaledScrollY)
-        modifiedEvent.setDoubleValueField(.scrollWheelEventDeltaAxis2, value: scaledScrollX)
-        
-        return Unmanaged.passRetained(modifiedEvent)
-    }
-    
-    private func handleFlagsChanged(event: CGEvent) {
-        let flags = event.flags
-        
-        // v2.0: Check if any configured modifier keys are pressed (only if slow speed is enabled and modifier keys are configured)
-        let wasActive = fnKeyPressed
-        fnKeyPressed = slowSpeedEnabled && !modifierKeys.isEmpty && modifierKeys.contains { key in
-            flags.contains(key.cgEventFlag)
-        }
-        
-        // Only handle state changes
-        if wasActive != fnKeyPressed {
-            handleActivationStateChange(isPressed: fnKeyPressed)
-        }
-    }
-    
-    private func handleActivationStateChange(isPressed: Bool) {
-        guard isPressed != isInPrecisionMode else { 
-            return 
-        }
-        
-        if isPressed && !isInPrecisionMode {
-            // Reset accumulator when activating precision mode
-            accumulatedX = 0.0
-            accumulatedY = 0.0
-            
-            // Start cursor tracking for precision mode
-            let currentPosition = NSEvent.mouseLocation
-            // Use screen coordinates directly since CGWarpMouseCursorPosition expects them
-            lastCursorPosition = currentPosition
-            
-            isInPrecisionMode = true
-            logger.info("Precision mode activated with factor \(self.precisionFactor)")
-        } else if !isPressed && isInPrecisionMode {
-            // Reset accumulator and stop tracking
-            accumulatedX = 0.0
-            accumulatedY = 0.0
-            
-            // Stop any drag tracking
-            if isDragging {
-                stopDragTracking()
-            }
-            
-            isInPrecisionMode = false
-            logger.info("Precision mode deactivated")
-        }
-        
-        // Update UI
-        DispatchQueue.main.async {
-            self.onPrecisionModeChange?(isPressed)
-        }
-    }
-    
-    // v2.0: Helper methods for drag acceleration
-    private func calculateEffectivePrecisionFactor(isDragging: Bool) -> Double {
-        // If slow speed is active, use configured precision factor
-        let baseFactor = (isInPrecisionMode && slowSpeedEnabled) ? precisionFactor : 1.0
-        
-        // Apply drag acceleration if enabled and dragging
-        guard isDragging && self.isDragging && dragAccelerationEnabled else {
-            return baseFactor
-        }
-        
-        // Non-linear acceleration curve
-        let progress = min(currentDragDistance / accelerationRadius, 1.0)
-        
-        // Cubic easing function for non-linear acceleration
-        // Slow increase near start, faster increase with distance
-        let easedProgress = progress * progress * (3.0 - 2.0 * progress)
-        
-        // For drag acceleration: start slower than base, accelerate to normal speed (factor 1.0)
-        // Use at least 2x slower (factor 2.0) as starting point for drag acceleration
-        let dragStartFactor = max(baseFactor, 2.0)
-        return dragStartFactor * (1.0 - easedProgress) + 1.0 * easedProgress
-    }
-    
-    private func startDragTracking(at position: CGPoint) {
-        isDragging = true
-        currentDragDistance = 0.0
-        logger.debug("Started drag tracking")
-    }
-    
-    private func stopDragTracking() {
-        isDragging = false
-        currentDragDistance = 0.0
-        logger.debug("Stopped drag tracking")
-    }
-    
-    private func getCursorPosition() -> CGPoint {
-        return NSEvent.mouseLocation
-    }
-}
-
-public enum PrecisionEngineError: LocalizedError {
-    case failedToCreateEventTap
-    
-    public var errorDescription: String? {
-        switch self {
-        case .failedToCreateEventTap:
-            return "Failed to create event tap. Please ensure accessibility permissions are granted."
-        }
-    }
-}
-</file>
-
 <file path="Tests/DragobooCoreTests/PointerScalerTests.swift">
 import XCTest
 @testable import DragobooCore
@@ -718,6 +290,470 @@ echo "If you still have issues, try logging out and back in, or restarting your 
 echo ""
 echo "The new version of Dragoboo uses safe event modification that won't"
 echo "cause permanent system changes even if the app crashes."
+</file>
+
+<file path="Sources/DragobooCore/PrecisionEngine.swift">
+// this_file: Sources/DragobooCore/PrecisionEngine.swift
+
+import Foundation
+import CoreGraphics
+import ApplicationServices
+import AppKit
+import os
+
+public enum ModifierKey: String, CaseIterable, Codable {
+    case fn, control, option, command
+    
+    public var cgEventFlag: CGEventFlags {
+        switch self {
+        case .fn: return .maskSecondaryFn
+        case .control: return .maskControl
+        case .option: return .maskAlternate
+        case .command: return .maskCommand
+        }
+    }
+    
+    public var displayName: String {
+        switch self {
+        case .fn: return "fn"
+        case .control: return "⌃"
+        case .option: return "⌥"
+        case .command: return "⌘"
+        }
+    }
+}
+
+public class PrecisionEngine {
+    private var eventTap: CFMachPort?
+    private var runLoopSource: CFRunLoopSource?
+    private var precisionFactor: Double
+    private var fnKeyPressed = false
+    private var isInPrecisionMode = false
+    private let logger = Logger(subsystem: "com.dragoboo.core", category: "PrecisionEngine")
+    
+    // Movement accumulator for precise fractional scaling
+    private var accumulatedX: Double = 0.0
+    private var accumulatedY: Double = 0.0
+    
+    // Cursor position tracking for manual control in precision mode
+    private var lastCursorPosition: CGPoint = .zero
+    
+    // v2.0: Configurable modifier keys
+    private var modifierKeys: Set<ModifierKey> = [.fn]
+    
+    // v2.0: Feature toggles
+    private var slowSpeedEnabled: Bool = true
+    private var dragAccelerationEnabled: Bool = true
+    private var slowSpeedPercentage: Double = 100.0
+    
+    // v2.0: Drag acceleration settings
+    private var accelerationRadius: Double = 200.0
+    private var isDragging = false
+    private var currentDragDistance: Double = 0.0
+    
+    public var onPrecisionModeChange: ((Bool) -> Void)?
+    
+    private static let fnKeyCode: CGKeyCode = 0x3F
+    
+    public init(precisionFactor: Double) {
+        self.precisionFactor = precisionFactor
+    }
+    
+    public func start() throws {
+        logger.info("Starting precision engine...")
+        
+        // Reset state on start
+        fnKeyPressed = false
+        isInPrecisionMode = false
+        
+        // Check accessibility permissions first
+        guard AXIsProcessTrusted() else {
+            logger.error("Accessibility permissions not granted")
+            throw PrecisionEngineError.failedToCreateEventTap
+        }
+        
+        // Listen for relevant events: flags changed, mouse movement, scrolling, dragging, and mouse button events
+        let flagsChangedMask: CGEventMask = 1 << CGEventType.flagsChanged.rawValue
+        let mouseMovedMask: CGEventMask = 1 << CGEventType.mouseMoved.rawValue
+        let leftMouseDownMask: CGEventMask = 1 << CGEventType.leftMouseDown.rawValue
+        let leftMouseUpMask: CGEventMask = 1 << CGEventType.leftMouseUp.rawValue
+        let rightMouseDownMask: CGEventMask = 1 << CGEventType.rightMouseDown.rawValue
+        let rightMouseUpMask: CGEventMask = 1 << CGEventType.rightMouseUp.rawValue
+        let otherMouseDownMask: CGEventMask = 1 << CGEventType.otherMouseDown.rawValue
+        let otherMouseUpMask: CGEventMask = 1 << CGEventType.otherMouseUp.rawValue
+        let leftMouseDraggedMask: CGEventMask = 1 << CGEventType.leftMouseDragged.rawValue
+        let rightMouseDraggedMask: CGEventMask = 1 << CGEventType.rightMouseDragged.rawValue
+        let otherMouseDraggedMask: CGEventMask = 1 << CGEventType.otherMouseDragged.rawValue
+        let scrollWheelMask: CGEventMask = 1 << CGEventType.scrollWheel.rawValue
+        let tapDisabledByTimeoutMask: CGEventMask = 1 << CGEventType.tapDisabledByTimeout.rawValue
+        let tapDisabledByUserInputMask: CGEventMask = 1 << CGEventType.tapDisabledByUserInput.rawValue
+        
+        let eventMask: CGEventMask = flagsChangedMask | mouseMovedMask | leftMouseDownMask | leftMouseUpMask |
+                                     rightMouseDownMask | rightMouseUpMask | otherMouseDownMask | otherMouseUpMask |
+                                     leftMouseDraggedMask | rightMouseDraggedMask | otherMouseDraggedMask |
+                                     scrollWheelMask | tapDisabledByTimeoutMask | tapDisabledByUserInputMask
+        
+        let selfPointer = Unmanaged.passUnretained(self).toOpaque()
+        
+        // Create event tap at annotated session level for reliable event modification
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgAnnotatedSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: eventMask,
+            callback: { proxy, type, event, userInfo in
+                guard let userInfo = userInfo else { 
+                    return Unmanaged.passUnretained(event) 
+                }
+                let engine = Unmanaged<PrecisionEngine>.fromOpaque(userInfo).takeUnretainedValue()
+                return engine.handleEvent(proxy: proxy, type: type, event: event)
+            },
+            userInfo: selfPointer
+        ) else {
+            logger.error("Failed to create event tap")
+            throw PrecisionEngineError.failedToCreateEventTap
+        }
+        
+        eventTap = tap
+        
+        // Create run loop source and add to main run loop
+        guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap!, 0) else {
+            logger.error("Failed to create run loop source")
+            CGEvent.tapEnable(tap: eventTap!, enable: false)
+            CFMachPortInvalidate(eventTap!)
+            throw PrecisionEngineError.failedToCreateEventTap
+        }
+        
+        runLoopSource = source
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: eventTap!, enable: true)
+        
+        logger.info("Precision engine started successfully")
+    }
+    
+    public func stop() {
+        // Reset precision mode state
+        if isInPrecisionMode {
+            isInPrecisionMode = false
+            logger.info("Precision mode deactivated on stop")
+        }
+        
+        if let tap = eventTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+            CFMachPortInvalidate(tap)
+        }
+        
+        if let source = runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+        }
+        
+        eventTap = nil
+        runLoopSource = nil
+        logger.info("Precision engine stopped")
+    }
+    
+    public func updatePrecisionFactor(_ factor: Double) {
+        precisionFactor = factor
+        // Calculate and store the percentage from the factor
+        // Since factor = 200.0 / percentage, then percentage = 200.0 / factor
+        slowSpeedPercentage = 200.0 / factor
+        logger.info("Updated precision factor to \(factor), percentage: \(self.slowSpeedPercentage)")
+    }
+    
+    // v2.0: Update configurable modifier keys
+    public func updateModifierKeys(_ keys: Set<ModifierKey>) {
+        modifierKeys = keys
+        logger.info("Updated modifier keys: \(keys)")
+    }
+    
+    // v2.0: Update drag acceleration radius
+    public func updateAccelerationRadius(_ radius: Double) {
+        accelerationRadius = radius
+        logger.info("Updated acceleration radius: \(radius)")
+    }
+    
+    // v2.0: Update feature toggles
+    public func updateSlowSpeedEnabled(_ enabled: Bool) {
+        slowSpeedEnabled = enabled
+        logger.info("Slow speed enabled: \(enabled)")
+        
+        // If slow speed is disabled and we're in precision mode, deactivate it
+        if !enabled && isInPrecisionMode {
+            handleActivationStateChange(isPressed: false)
+        }
+    }
+    
+    public func updateDragAccelerationEnabled(_ enabled: Bool) {
+        dragAccelerationEnabled = enabled
+        logger.info("Drag acceleration enabled: \(enabled)")
+    }
+    
+    private func handleEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        switch type {
+        case .flagsChanged:
+            handleFlagsChanged(event: event)
+            
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+            if dragAccelerationEnabled {
+                startDragTracking(at: getCursorPosition())
+            }
+            
+        case .leftMouseUp, .rightMouseUp, .otherMouseUp:
+            if isDragging {
+                stopDragTracking()
+            }
+            
+        case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
+            let isDragEvent = type != .mouseMoved
+            let shouldModify = (isInPrecisionMode && slowSpeedEnabled) || (isDragEvent && isDragging && dragAccelerationEnabled)
+            if shouldModify {
+                return modifyMovementEvent(event: event, isDragEvent: isDragEvent)
+            }
+            
+        case .scrollWheel:
+            if isInPrecisionMode && slowSpeedEnabled {
+                return modifyScrollEvent(event: event)
+            }
+            
+        case .tapDisabledByTimeout, .tapDisabledByUserInput:
+            logger.warning("Event tap disabled, attempting to re-enable")
+            if let tap = self.eventTap {
+                CGEvent.tapEnable(tap: tap, enable: true)
+            }
+            
+        default:
+            break
+        }
+        
+        return Unmanaged.passUnretained(event)
+    }
+    
+    /// Intercepts mouse movement events and controls cursor movement for precision mode and drag acceleration
+    /// Uses accumulation algorithm to handle fractional movements properly
+    private func modifyMovementEvent(event: CGEvent, isDragEvent: Bool) -> Unmanaged<CGEvent>? {
+        // Get the movement delta - try both integer and double fields
+        let deltaXInt = event.getIntegerValueField(.mouseEventDeltaX)
+        let deltaYInt = event.getIntegerValueField(.mouseEventDeltaY)
+        let deltaXDouble = event.getDoubleValueField(.mouseEventDeltaX) 
+        let deltaYDouble = event.getDoubleValueField(.mouseEventDeltaY)
+        
+        // Use whichever has non-zero values
+        let deltaX = deltaXInt != 0 ? Double(deltaXInt) : deltaXDouble
+        let deltaY = deltaYInt != 0 ? Double(deltaYInt) : deltaYDouble
+        
+        // Skip if no movement
+        guard deltaX != 0 || deltaY != 0 else {
+            return Unmanaged.passUnretained(event)
+        }
+        
+        // Update drag distance if dragging (use actual movement, not scaled)
+        if isDragEvent && isDragging {
+            currentDragDistance += sqrt(deltaX * deltaX + deltaY * deltaY)
+            logger.debug("Drag distance: \(self.currentDragDistance), radius: \(self.accelerationRadius)")
+        }
+        
+        // Calculate effective precision factor with drag acceleration
+        let effectiveFactor = calculateEffectivePrecisionFactor(isDragging: isDragEvent)
+        
+        // Apply precision scaling with accumulation
+        accumulatedX += deltaX / effectiveFactor
+        accumulatedY += deltaY / effectiveFactor
+        
+        // Extract integer parts for the actual movement
+        let scaledX = Int(accumulatedX)
+        let scaledY = Int(accumulatedY)
+        
+        // Keep the fractional remainders for next time
+        accumulatedX -= Double(scaledX)
+        accumulatedY -= Double(scaledY)
+        
+        // For precision mode OR drag acceleration, use appropriate handling
+        if (isInPrecisionMode && slowSpeedEnabled) || (isDragEvent && isDragging && dragAccelerationEnabled) {
+            // Use manual cursor warping for precise control
+            let newPosition = CGPoint(
+                x: lastCursorPosition.x + Double(scaledX),
+                y: lastCursorPosition.y + Double(scaledY)
+            )
+            
+            // Warp cursor to new position
+            let warpResult = CGWarpMouseCursorPosition(newPosition)
+            if warpResult == .success {
+                lastCursorPosition = newPosition
+            } else {
+                logger.error("Failed to warp cursor to position: \(newPosition.x), \(newPosition.y)")
+                return Unmanaged.passUnretained(event)
+            }
+            
+            // Consume the original event
+            return nil
+        } else {
+            // For other cases, pass through unmodified
+            return Unmanaged.passUnretained(event)
+        }
+    }
+    
+    /// Modifies scroll wheel events to slow them down when precision mode is active
+    private func modifyScrollEvent(event: CGEvent) -> Unmanaged<CGEvent>? {
+        // Get the scroll delta
+        let scrollDeltaY = event.getDoubleValueField(.scrollWheelEventDeltaAxis1)
+        let scrollDeltaX = event.getDoubleValueField(.scrollWheelEventDeltaAxis2)
+        
+        // Apply precision scaling (reduce scrolling by precision factor)
+        let scaledScrollY = scrollDeltaY / precisionFactor
+        let scaledScrollX = scrollDeltaX / precisionFactor
+        
+        // Create a new event with modified scroll deltas
+        guard let modifiedEvent = event.copy() else {
+            logger.error("Failed to copy scroll event")
+            return Unmanaged.passUnretained(event)
+        }
+        
+        modifiedEvent.setDoubleValueField(.scrollWheelEventDeltaAxis1, value: scaledScrollY)
+        modifiedEvent.setDoubleValueField(.scrollWheelEventDeltaAxis2, value: scaledScrollX)
+        
+        return Unmanaged.passRetained(modifiedEvent)
+    }
+    
+    private func handleFlagsChanged(event: CGEvent) {
+        let flags = event.flags
+        
+        // v2.0: Check if any configured modifier keys are pressed (only if slow speed is enabled and modifier keys are configured)
+        let wasActive = fnKeyPressed
+        fnKeyPressed = slowSpeedEnabled && !modifierKeys.isEmpty && modifierKeys.contains { key in
+            flags.contains(key.cgEventFlag)
+        }
+        
+        // Only handle state changes
+        if wasActive != fnKeyPressed {
+            handleActivationStateChange(isPressed: fnKeyPressed)
+        }
+    }
+    
+    private func handleActivationStateChange(isPressed: Bool) {
+        guard isPressed != isInPrecisionMode else { 
+            return 
+        }
+        
+        if isPressed && !isInPrecisionMode {
+            // Reset accumulator when activating precision mode
+            accumulatedX = 0.0
+            accumulatedY = 0.0
+            
+            // Start cursor tracking for precision mode
+            let nsEventPosition = NSEvent.mouseLocation
+            // Convert from NSEvent coordinates (bottom-left origin) to CG coordinates (top-left origin)
+            if let mainScreen = NSScreen.main {
+                lastCursorPosition = CGPoint(
+                    x: nsEventPosition.x,
+                    y: mainScreen.frame.height - nsEventPosition.y
+                )
+            } else {
+                lastCursorPosition = nsEventPosition
+            }
+            
+            isInPrecisionMode = true
+            logger.info("Precision mode activated with factor \(self.precisionFactor)")
+        } else if !isPressed && isInPrecisionMode {
+            // Reset accumulator and stop tracking
+            accumulatedX = 0.0
+            accumulatedY = 0.0
+            
+            // Stop any drag tracking
+            if isDragging {
+                stopDragTracking()
+            }
+            
+            isInPrecisionMode = false
+            logger.info("Precision mode deactivated")
+        }
+        
+        // Update UI
+        DispatchQueue.main.async {
+            self.onPrecisionModeChange?(isPressed)
+        }
+    }
+    
+    // v2.0: Helper methods for drag acceleration
+    private func calculateEffectivePrecisionFactor(isDragging: Bool) -> Double {
+        // The system's baseline "normal" speed is factor 2.0
+        let normalSpeedFactor = 2.0
+        
+        // If dragging with drag acceleration enabled, it overrides slow speed
+        if isDragging && self.isDragging && dragAccelerationEnabled {
+            // Calculate progress from drag start to radius
+            let progress = min(currentDragDistance / accelerationRadius, 1.0)
+            
+            // Cubic easing function for smooth acceleration
+            let easedProgress = progress * progress * (3.0 - 2.0 * progress)
+            
+            // Start at the speed defined by slow speed slider (converted to factor)
+            let startFactor = 200.0 / slowSpeedPercentage
+            
+            // Drag acceleration: start at slider speed, accelerate to normal speed (2.0)
+            return startFactor * (1.0 - easedProgress) + normalSpeedFactor * easedProgress
+        }
+        
+        // Otherwise, use slow speed if active
+        if isInPrecisionMode && slowSpeedEnabled {
+            return precisionFactor
+        }
+        
+        // Normal speed when no modifiers
+        return normalSpeedFactor
+    }
+    
+    private func startDragTracking(at position: CGPoint) {
+        isDragging = true
+        currentDragDistance = 0.0
+        
+        // Reset accumulators for clean drag tracking
+        accumulatedX = 0.0
+        accumulatedY = 0.0
+        
+        // Initialize cursor position for drag acceleration if not already tracking
+        if lastCursorPosition == .zero {
+            let nsEventPosition = NSEvent.mouseLocation
+            // Convert from NSEvent coordinates (bottom-left origin) to CG coordinates (top-left origin)
+            if let mainScreen = NSScreen.main {
+                lastCursorPosition = CGPoint(
+                    x: nsEventPosition.x,
+                    y: mainScreen.frame.height - nsEventPosition.y
+                )
+            } else {
+                lastCursorPosition = nsEventPosition
+            }
+        }
+        
+        logger.info("Started drag tracking")
+    }
+    
+    private func stopDragTracking() {
+        isDragging = false
+        currentDragDistance = 0.0
+        
+        // Reset cursor position if not in precision mode
+        if !isInPrecisionMode {
+            lastCursorPosition = .zero
+        }
+        
+        logger.info("Stopped drag tracking")
+    }
+    
+    private func getCursorPosition() -> CGPoint {
+        return NSEvent.mouseLocation
+    }
+}
+
+public enum PrecisionEngineError: LocalizedError {
+    case failedToCreateEventTap
+    
+    public var errorDescription: String? {
+        switch self {
+        case .failedToCreateEventTap:
+            return "Failed to create event tap. Please ensure accessibility permissions are granted."
+        }
+    }
+}
 </file>
 
 <file path="Info.plist">
@@ -1161,370 +1197,6 @@ else
 fi
 </file>
 
-<file path="Sources/DragobooApp/ContentView.swift">
-import SwiftUI
-import DragobooCore
-
-struct ContentView: View {
-    @EnvironmentObject var appState: AppState
-    @Environment(\.dismiss) private var dismiss
-    
-    var body: some View {
-        VStack(spacing: 16) {
-            if !appState.isAccessibilityGranted {
-                AccessibilityRequestView()
-            } else {
-                VStack(spacing: 12) {
-                    SlowSpeedToggleView()
-                    DragAccelerationToggleView()
-                    BottomSection()
-                }
-            }
-        }
-        .onAppear { 
-            appState.refreshPermissions() 
-        }
-        .padding(16)
-        .frame(width: 300)
-    }
-}
-
-struct AccessibilityRequestView: View {
-    @EnvironmentObject var appState: AppState
-    
-    var body: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "lock.shield")
-                .font(.system(size: 48))
-                .foregroundColor(.orange)
-            
-            Text("Accessibility Permission Required")
-                .font(.headline)
-            
-            Text("Dragoboo needs accessibility permissions to modify cursor movement.")
-                .font(.caption)
-                .multilineTextAlignment(.center)
-                .foregroundColor(.secondary)
-            
-            Button("Grant Permission") {
-                appState.requestAccessibility()
-            }
-            .controlSize(.large)
-        }
-    }
-}
-
-struct SlowSpeedToggleView: View {
-    @EnvironmentObject var appState: AppState
-    @State private var slowSpeedPercentage: Double = 100.0
-    
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Toggle("Slow speed", isOn: Binding(
-                    get: { appState.slowSpeedEnabled },
-                    set: { _ in appState.toggleSlowSpeed() }
-                ))
-                .toggleStyle(.checkbox)
-                
-                Spacer()
-                
-                if appState.slowSpeedEnabled {
-                    ModifierKeyButtons()
-                }
-            }
-            
-            // Always show slider since it affects drag acceleration too
-            VStack(spacing: 4) {
-                Slider(value: $slowSpeedPercentage, in: 1...100, step: 5) { _ in
-                    appState.updateSlowSpeedPercentage(slowSpeedPercentage)
-                }
-                
-                Text("\(Int(slowSpeedPercentage))%")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                
-                if appState.slowSpeedEnabled && appState.modifierKeys.isEmpty {
-                    Text("Select modifier keys to activate")
-                        .font(.caption2)
-                        .foregroundColor(.orange)
-                }
-            }
-            .onAppear {
-                slowSpeedPercentage = appState.slowSpeedPercentage
-            }
-        }
-    }
-}
-
-struct ModifierKeyButtons: View {
-    @EnvironmentObject var appState: AppState
-    
-    var body: some View {
-        HStack(spacing: 4) {
-            ForEach(ModifierKey.allCases, id: \.self) { key in
-                Button(key.displayName) {
-                    appState.toggleModifierKey(key)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.mini)
-                .background(buttonBackground(for: key))
-                .foregroundColor(buttonForeground(for: key))
-                .cornerRadius(3)
-            }
-        }
-    }
-    
-    private func buttonBackground(for key: ModifierKey) -> Color {
-        let isSelected = appState.modifierKeys.contains(key)
-        let isActive = appState.isPrecisionModeActive && isSelected
-        
-        if isActive {
-            return .green
-        } else if isSelected {
-            return .accentColor
-        } else {
-            return .clear
-        }
-    }
-    
-    private func buttonForeground(for key: ModifierKey) -> Color {
-        let isSelected = appState.modifierKeys.contains(key)
-        return isSelected ? .white : .primary
-    }
-}
-
-struct DragAccelerationToggleView: View {
-    @EnvironmentObject var appState: AppState
-    @State private var accelerationRadius: Double = 200.0
-    
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Toggle("Drag acceleration", isOn: Binding(
-                    get: { appState.dragAccelerationEnabled },
-                    set: { _ in appState.toggleDragAcceleration() }
-                ))
-                .toggleStyle(.checkbox)
-                
-                Spacer()
-            }
-            
-            if appState.dragAccelerationEnabled {
-                VStack(spacing: 4) {
-                    Slider(value: $accelerationRadius, in: 50...1000, step: 50) { _ in
-                        appState.updateAccelerationRadius(accelerationRadius)
-                    }
-                    
-                    Text("\(Int(accelerationRadius))px")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    
-                    Text("Speed increases from slow to normal over this distance")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
-                .onAppear {
-                    accelerationRadius = appState.accelerationRadius
-                }
-            }
-        }
-    }
-}
-
-struct BottomSection: View {
-    @EnvironmentObject var appState: AppState
-    
-    var body: some View {
-        HStack {
-            Text("Dragoboo v2.0.0")
-                .font(.caption)
-                .foregroundColor(.secondary)
-            
-            Spacer()
-            
-            Button("Quit") {
-                NSApplication.shared.terminate(nil)
-            }
-            .keyboardShortcut("q", modifiers: .command)
-        }
-    }
-}
-
-#Preview {
-    ContentView()
-        .environmentObject(AppState())
-}
-</file>
-
-<file path="Sources/DragobooApp/DragobooApp.swift">
-import SwiftUI
-import DragobooCore
-import os
-
-@main
-struct DragobooApp: App {
-    @StateObject private var appState = AppState()
-    private let logger = Logger(subsystem: "com.dragoboo.app", category: "main")
-    
-    var body: some Scene {
-        MenuBarExtra("Dragoboo", systemImage: "cursorarrow") {
-            ContentView()
-                .environmentObject(appState)
-        }
-        .menuBarExtraStyle(.window)
-    }
-}
-
-class AppState: ObservableObject {
-    @Published var isPrecisionModeActive = false
-    @Published var isAccessibilityGranted = false
-    @Published var isDragging = false
-    
-    // v2.0: Feature toggles
-    @AppStorage("slowSpeedEnabled") var slowSpeedEnabled: Bool = true
-    @AppStorage("dragAccelerationEnabled") var dragAccelerationEnabled: Bool = true
-    
-    // v2.0: Percentage-based precision factor (100% = normal speed)
-    @AppStorage("slowSpeedPercentage") var slowSpeedPercentage: Double = 100.0
-    
-    // v2.0: Configurable modifier keys
-    @AppStorage("modifierKeysData") private var modifierKeysData: Data = Data()
-    
-    // v2.0: Drag acceleration settings
-    @AppStorage("accelerationRadius") var accelerationRadius: Double = 200.0
-    
-    // Legacy support for existing precision factor
-    @AppStorage("precisionFactor") private var legacyPrecisionFactor: Double = 4.0
-    
-    var modifierKeys: Set<ModifierKey> {
-        get {
-            guard let decoded = try? JSONDecoder().decode(Set<ModifierKey>.self, from: modifierKeysData) else {
-                return [.fn] // Default to fn key
-            }
-            return decoded
-        }
-        set {
-            modifierKeysData = (try? JSONEncoder().encode(newValue)) ?? Data()
-            precisionEngine?.updateModifierKeys(newValue)
-        }
-    }
-    
-    // Fixed: 100% = normal speed (factor 1.0), below 100% = slower, above 100% = faster
-    var precisionFactor: Double {
-        return 100.0 / slowSpeedPercentage
-    }
-    
-    private var precisionEngine: PrecisionEngine?
-    private let logger = Logger(subsystem: "com.dragoboo.app", category: "AppState")
-    
-    init() {
-        // Migrate from old percentage system: reset to 100% (normal speed) for consistency
-        // This ensures all users start with the intuitive 100% = normal speed baseline
-        if slowSpeedPercentage != 100.0 {
-            slowSpeedPercentage = 100.0
-        }
-        
-        checkPermissions()
-        setupPrecisionEngine()
-    }
-    
-    private func checkPermissions() {
-        // Check Accessibility permission (required for fn key detection)
-        isAccessibilityGranted = AXIsProcessTrusted()
-    }
-    
-    func requestAccessibility() {
-        let options: NSDictionary = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
-        isAccessibilityGranted = AXIsProcessTrustedWithOptions(options)
-        
-        if isAccessibilityGranted {
-            setupPrecisionEngine()
-        }
-    }
-    
-    private func setupPrecisionEngine() {
-        guard isAccessibilityGranted else { 
-            return 
-        }
-        
-        precisionEngine = PrecisionEngine(precisionFactor: precisionFactor)
-        precisionEngine?.onPrecisionModeChange = { [weak self] isActive in
-            DispatchQueue.main.async {
-                self?.isPrecisionModeActive = isActive
-            }
-        }
-        
-        // Configure settings
-        precisionEngine?.updateModifierKeys(modifierKeys)
-        precisionEngine?.updateAccelerationRadius(accelerationRadius)
-        precisionEngine?.updateSlowSpeedEnabled(slowSpeedEnabled)
-        precisionEngine?.updateDragAccelerationEnabled(dragAccelerationEnabled)
-        
-        do {
-            try precisionEngine?.start()
-            logger.info("Precision engine started successfully")
-        } catch {
-            logger.error("Failed to start precision engine: \(error.localizedDescription)")
-        }
-    }
-    
-    func toggleModifierKey(_ key: ModifierKey) {
-        var keys = modifierKeys
-        if keys.contains(key) {
-            keys.remove(key) // Allow removing all keys to disable slow speed
-        } else {
-            keys.insert(key)
-        }
-        modifierKeys = keys
-    }
-    
-    func updateSlowSpeedPercentage(_ percentage: Double) {
-        slowSpeedPercentage = percentage
-        precisionEngine?.updatePrecisionFactor(precisionFactor)
-    }
-    
-    func updateAccelerationRadius(_ radius: Double) {
-        accelerationRadius = radius
-        precisionEngine?.updateAccelerationRadius(radius)
-    }
-    
-    func updatePrecisionFactor(_ factor: Double) {
-        slowSpeedPercentage = 100.0 / factor
-        precisionEngine?.updatePrecisionFactor(factor)
-    }
-    
-    func toggleSlowSpeed() {
-        slowSpeedEnabled.toggle()
-        precisionEngine?.updateSlowSpeedEnabled(slowSpeedEnabled)
-    }
-    
-    func toggleDragAcceleration() {
-        dragAccelerationEnabled.toggle()
-        precisionEngine?.updateDragAccelerationEnabled(dragAccelerationEnabled)
-    }
-    
-    /// Re-check permissions and restart/stop PrecisionEngine accordingly.
-    func refreshPermissions() {
-        let trusted = AXIsProcessTrusted()
-        if trusted != isAccessibilityGranted {
-            isAccessibilityGranted = trusted
-            logger.debug("Accessibility permission changed. trusted = \(trusted)")
-            if trusted {
-                setupPrecisionEngine()
-            } else {
-                precisionEngine?.stop()
-                precisionEngine = nil
-            }
-        }
-    }
-    
-    deinit {
-        precisionEngine?.stop()
-    }
-}
-</file>
-
 <file path="README.md">
 # Dragoboo 🐉🖱️
 
@@ -1848,6 +1520,368 @@ MIT License - see [LICENSE](LICENSE) for details.
 ---
 
 **Made with ❤️ for macOS productivity and precision**
+</file>
+
+<file path="Sources/DragobooApp/ContentView.swift">
+import SwiftUI
+import DragobooCore
+
+struct ContentView: View {
+    @EnvironmentObject var appState: AppState
+    @Environment(\.dismiss) private var dismiss
+    
+    var body: some View {
+        VStack(spacing: 16) {
+            if !appState.isAccessibilityGranted {
+                AccessibilityRequestView()
+            } else {
+                VStack(spacing: 12) {
+                    SlowSpeedToggleView()
+                    DragAccelerationToggleView()
+                    BottomSection()
+                }
+            }
+        }
+        .onAppear { 
+            appState.refreshPermissions() 
+        }
+        .padding(16)
+        .frame(width: 300)
+    }
+}
+
+struct AccessibilityRequestView: View {
+    @EnvironmentObject var appState: AppState
+    
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "lock.shield")
+                .font(.system(size: 48))
+                .foregroundColor(.orange)
+            
+            Text("Accessibility Permission Required")
+                .font(.headline)
+            
+            Text("Dragoboo needs accessibility permissions to modify cursor movement.")
+                .font(.caption)
+                .multilineTextAlignment(.center)
+                .foregroundColor(.secondary)
+            
+            Button("Grant Permission") {
+                appState.requestAccessibility()
+            }
+            .controlSize(.large)
+        }
+    }
+}
+
+struct SlowSpeedToggleView: View {
+    @EnvironmentObject var appState: AppState
+    @State private var slowSpeedPercentage: Double = 100.0
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Toggle("Slow speed", isOn: Binding(
+                    get: { appState.slowSpeedEnabled },
+                    set: { _ in appState.toggleSlowSpeed() }
+                ))
+                .toggleStyle(.checkbox)
+                
+                Spacer()
+                
+                if appState.slowSpeedEnabled {
+                    ModifierKeyButtons()
+                }
+            }
+            
+            // Always show slider since it affects drag acceleration too
+            VStack(spacing: 4) {
+                Slider(value: $slowSpeedPercentage, in: 1...100, step: 5) { _ in
+                    appState.updateSlowSpeedPercentage(slowSpeedPercentage)
+                }
+                
+                Text("\(Int(slowSpeedPercentage))%")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                
+                if appState.slowSpeedEnabled && appState.modifierKeys.isEmpty {
+                    Text("Select modifier keys to activate")
+                        .font(.caption2)
+                        .foregroundColor(.orange)
+                }
+            }
+            .onAppear {
+                slowSpeedPercentage = appState.slowSpeedPercentage
+            }
+        }
+    }
+}
+
+struct ModifierKeyButtons: View {
+    @EnvironmentObject var appState: AppState
+    
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(ModifierKey.allCases, id: \.self) { key in
+                Button(key.displayName) {
+                    appState.toggleModifierKey(key)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+                .background(buttonBackground(for: key))
+                .foregroundColor(buttonForeground(for: key))
+                .cornerRadius(3)
+            }
+        }
+    }
+    
+    private func buttonBackground(for key: ModifierKey) -> Color {
+        let isSelected = appState.modifierKeys.contains(key)
+        let isActive = appState.isPrecisionModeActive && isSelected
+        
+        if isActive {
+            return .green
+        } else if isSelected {
+            return .accentColor
+        } else {
+            return .clear
+        }
+    }
+    
+    private func buttonForeground(for key: ModifierKey) -> Color {
+        let isSelected = appState.modifierKeys.contains(key)
+        return isSelected ? .white : .primary
+    }
+}
+
+struct DragAccelerationToggleView: View {
+    @EnvironmentObject var appState: AppState
+    @State private var accelerationRadius: Double = 200.0
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Toggle("Drag acceleration", isOn: Binding(
+                    get: { appState.dragAccelerationEnabled },
+                    set: { _ in appState.toggleDragAcceleration() }
+                ))
+                .toggleStyle(.checkbox)
+                
+                Spacer()
+            }
+            
+            if appState.dragAccelerationEnabled {
+                VStack(spacing: 4) {
+                    Slider(value: $accelerationRadius, in: 50...1000, step: 50) { _ in
+                        appState.updateAccelerationRadius(accelerationRadius)
+                    }
+                    
+                    Text("\(Int(accelerationRadius))px")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    
+                    Text("Speed increases from slow to normal over this distance")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                .onAppear {
+                    accelerationRadius = appState.accelerationRadius
+                }
+            }
+        }
+    }
+}
+
+struct BottomSection: View {
+    @EnvironmentObject var appState: AppState
+    
+    var body: some View {
+        HStack {
+            Text("Dragoboo v2.0.0")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            
+            Spacer()
+            
+            Button("Quit") {
+                NSApplication.shared.terminate(nil)
+            }
+            .keyboardShortcut("q", modifiers: .command)
+        }
+    }
+}
+
+#Preview {
+    ContentView()
+        .environmentObject(AppState())
+}
+</file>
+
+<file path="Sources/DragobooApp/DragobooApp.swift">
+import SwiftUI
+import DragobooCore
+import os
+
+@main
+struct DragobooApp: App {
+    @StateObject private var appState = AppState()
+    private let logger = Logger(subsystem: "com.dragoboo.app", category: "main")
+    
+    var body: some Scene {
+        MenuBarExtra("Dragoboo", systemImage: "cursorarrow") {
+            ContentView()
+                .environmentObject(appState)
+        }
+        .menuBarExtraStyle(.window)
+    }
+}
+
+class AppState: ObservableObject {
+    @Published var isPrecisionModeActive = false
+    @Published var isAccessibilityGranted = false
+    @Published var isDragging = false
+    
+    // v2.0: Feature toggles
+    @AppStorage("slowSpeedEnabled") var slowSpeedEnabled: Bool = true
+    @AppStorage("dragAccelerationEnabled") var dragAccelerationEnabled: Bool = true
+    
+    // v2.0: Percentage-based precision factor (100% = normal speed)
+    @AppStorage("slowSpeedPercentage") var slowSpeedPercentage: Double = 100.0
+    
+    // v2.0: Configurable modifier keys
+    @AppStorage("modifierKeysData") private var modifierKeysData: Data = Data()
+    
+    // v2.0: Drag acceleration settings
+    @AppStorage("accelerationRadius") var accelerationRadius: Double = 200.0
+    
+    // Legacy support for existing precision factor
+    @AppStorage("precisionFactor") private var legacyPrecisionFactor: Double = 4.0
+    
+    var modifierKeys: Set<ModifierKey> {
+        get {
+            guard let decoded = try? JSONDecoder().decode(Set<ModifierKey>.self, from: modifierKeysData) else {
+                return [.fn] // Default to fn key
+            }
+            return decoded
+        }
+        set {
+            modifierKeysData = (try? JSONEncoder().encode(newValue)) ?? Data()
+            precisionEngine?.updateModifierKeys(newValue)
+        }
+    }
+    
+    // Fixed: 100% = normal speed (factor 2.0 baseline), below 100% = slower
+    var precisionFactor: Double {
+        // The system's "normal" speed is factor 2.0, not 1.0
+        return 200.0 / slowSpeedPercentage
+    }
+    
+    private var precisionEngine: PrecisionEngine?
+    private let logger = Logger(subsystem: "com.dragoboo.app", category: "AppState")
+    
+    init() {
+        // Force reset to 100% (normal speed) to fix any legacy values
+        slowSpeedPercentage = 100.0
+        
+        checkPermissions()
+        setupPrecisionEngine()
+    }
+    
+    private func checkPermissions() {
+        // Check Accessibility permission (required for fn key detection)
+        isAccessibilityGranted = AXIsProcessTrusted()
+    }
+    
+    func requestAccessibility() {
+        let options: NSDictionary = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
+        isAccessibilityGranted = AXIsProcessTrustedWithOptions(options)
+        
+        if isAccessibilityGranted {
+            setupPrecisionEngine()
+        }
+    }
+    
+    private func setupPrecisionEngine() {
+        guard isAccessibilityGranted else { 
+            return 
+        }
+        
+        precisionEngine = PrecisionEngine(precisionFactor: precisionFactor)
+        precisionEngine?.onPrecisionModeChange = { [weak self] isActive in
+            DispatchQueue.main.async {
+                self?.isPrecisionModeActive = isActive
+            }
+        }
+        
+        // Configure settings
+        precisionEngine?.updateModifierKeys(modifierKeys)
+        precisionEngine?.updateAccelerationRadius(accelerationRadius)
+        precisionEngine?.updateSlowSpeedEnabled(slowSpeedEnabled)
+        precisionEngine?.updateDragAccelerationEnabled(dragAccelerationEnabled)
+        
+        do {
+            try precisionEngine?.start()
+            logger.info("Precision engine started successfully")
+        } catch {
+            logger.error("Failed to start precision engine: \(error.localizedDescription)")
+        }
+    }
+    
+    func toggleModifierKey(_ key: ModifierKey) {
+        var keys = modifierKeys
+        if keys.contains(key) {
+            keys.remove(key) // Allow removing all keys to disable slow speed
+        } else {
+            keys.insert(key)
+        }
+        modifierKeys = keys
+    }
+    
+    func updateSlowSpeedPercentage(_ percentage: Double) {
+        slowSpeedPercentage = percentage
+        precisionEngine?.updatePrecisionFactor(precisionFactor)
+    }
+    
+    func updateAccelerationRadius(_ radius: Double) {
+        accelerationRadius = radius
+        precisionEngine?.updateAccelerationRadius(radius)
+    }
+    
+    func updatePrecisionFactor(_ factor: Double) {
+        slowSpeedPercentage = 100.0 / factor
+        precisionEngine?.updatePrecisionFactor(factor)
+    }
+    
+    func toggleSlowSpeed() {
+        slowSpeedEnabled.toggle()
+        precisionEngine?.updateSlowSpeedEnabled(slowSpeedEnabled)
+    }
+    
+    func toggleDragAcceleration() {
+        dragAccelerationEnabled.toggle()
+        precisionEngine?.updateDragAccelerationEnabled(dragAccelerationEnabled)
+    }
+    
+    /// Re-check permissions and restart/stop PrecisionEngine accordingly.
+    func refreshPermissions() {
+        let trusted = AXIsProcessTrusted()
+        if trusted != isAccessibilityGranted {
+            isAccessibilityGranted = trusted
+            logger.debug("Accessibility permission changed. trusted = \(trusted)")
+            if trusted {
+                setupPrecisionEngine()
+            } else {
+                precisionEngine?.stop()
+                precisionEngine = nil
+            }
+        }
+    }
+    
+    deinit {
+        precisionEngine?.stop()
+    }
+}
 </file>
 
 </files>

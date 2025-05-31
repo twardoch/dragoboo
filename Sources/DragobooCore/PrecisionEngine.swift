@@ -49,6 +49,7 @@ public class PrecisionEngine {
     // v2.0: Feature toggles
     private var slowSpeedEnabled: Bool = true
     private var dragAccelerationEnabled: Bool = true
+    private var slowSpeedPercentage: Double = 100.0
     
     // v2.0: Drag acceleration settings
     private var accelerationRadius: Double = 200.0
@@ -158,7 +159,10 @@ public class PrecisionEngine {
     
     public func updatePrecisionFactor(_ factor: Double) {
         precisionFactor = factor
-        logger.info("Updated precision factor to \(factor)")
+        // Calculate and store the percentage from the factor
+        // Since factor = 200.0 / percentage, then percentage = 200.0 / factor
+        slowSpeedPercentage = 200.0 / factor
+        logger.info("Updated precision factor to \(factor), percentage: \(self.slowSpeedPercentage)")
     }
     
     // v2.0: Update configurable modifier keys
@@ -247,6 +251,12 @@ public class PrecisionEngine {
             return Unmanaged.passUnretained(event)
         }
         
+        // Update drag distance if dragging (use actual movement, not scaled)
+        if isDragEvent && isDragging {
+            currentDragDistance += sqrt(deltaX * deltaX + deltaY * deltaY)
+            logger.debug("Drag distance: \(self.currentDragDistance), radius: \(self.accelerationRadius)")
+        }
+        
         // Calculate effective precision factor with drag acceleration
         let effectiveFactor = calculateEffectivePrecisionFactor(isDragging: isDragEvent)
         
@@ -262,13 +272,9 @@ public class PrecisionEngine {
         accumulatedX -= Double(scaledX)
         accumulatedY -= Double(scaledY)
         
-        // Update drag distance if dragging
-        if isDragEvent && isDragging {
-            currentDragDistance += sqrt(Double(scaledX * scaledX + scaledY * scaledY))
-        }
-        
-        // For precision mode, use manual cursor warping with proper coordinate handling
-        if isInPrecisionMode && slowSpeedEnabled {
+        // For precision mode OR drag acceleration, use appropriate handling
+        if (isInPrecisionMode && slowSpeedEnabled) || (isDragEvent && isDragging && dragAccelerationEnabled) {
+            // Use manual cursor warping for precise control
             let newPosition = CGPoint(
                 x: lastCursorPosition.x + Double(scaledX),
                 y: lastCursorPosition.y + Double(scaledY)
@@ -286,16 +292,8 @@ public class PrecisionEngine {
             // Consume the original event
             return nil
         } else {
-            // For drag acceleration without precision mode, modify event deltas
-            guard let modifiedEvent = event.copy() else {
-                logger.error("Failed to copy movement event")
-                return Unmanaged.passUnretained(event)
-            }
-            
-            modifiedEvent.setDoubleValueField(.mouseEventDeltaX, value: Double(scaledX))
-            modifiedEvent.setDoubleValueField(.mouseEventDeltaY, value: Double(scaledY))
-            
-            return Unmanaged.passRetained(modifiedEvent)
+            // For other cases, pass through unmodified
+            return Unmanaged.passUnretained(event)
         }
     }
     
@@ -347,9 +345,16 @@ public class PrecisionEngine {
             accumulatedY = 0.0
             
             // Start cursor tracking for precision mode
-            let currentPosition = NSEvent.mouseLocation
-            // Use screen coordinates directly since CGWarpMouseCursorPosition expects them
-            lastCursorPosition = currentPosition
+            let nsEventPosition = NSEvent.mouseLocation
+            // Convert from NSEvent coordinates (bottom-left origin) to CG coordinates (top-left origin)
+            if let mainScreen = NSScreen.main {
+                lastCursorPosition = CGPoint(
+                    x: nsEventPosition.x,
+                    y: mainScreen.frame.height - nsEventPosition.y
+                )
+            } else {
+                lastCursorPosition = nsEventPosition
+            }
             
             isInPrecisionMode = true
             logger.info("Precision mode activated with factor \(self.precisionFactor)")
@@ -375,37 +380,68 @@ public class PrecisionEngine {
     
     // v2.0: Helper methods for drag acceleration
     private func calculateEffectivePrecisionFactor(isDragging: Bool) -> Double {
-        // If slow speed is active, use configured precision factor
-        let baseFactor = (isInPrecisionMode && slowSpeedEnabled) ? precisionFactor : 1.0
+        // The system's baseline "normal" speed is factor 2.0
+        let normalSpeedFactor = 2.0
         
-        // Apply drag acceleration if enabled and dragging
-        guard isDragging && self.isDragging && dragAccelerationEnabled else {
-            return baseFactor
+        // If dragging with drag acceleration enabled, it overrides slow speed
+        if isDragging && self.isDragging && dragAccelerationEnabled {
+            // Calculate progress from drag start to radius
+            let progress = min(currentDragDistance / accelerationRadius, 1.0)
+            
+            // Cubic easing function for smooth acceleration
+            let easedProgress = progress * progress * (3.0 - 2.0 * progress)
+            
+            // Start at the speed defined by slow speed slider (converted to factor)
+            let startFactor = 200.0 / slowSpeedPercentage
+            
+            // Drag acceleration: start at slider speed, accelerate to normal speed (2.0)
+            return startFactor * (1.0 - easedProgress) + normalSpeedFactor * easedProgress
         }
         
-        // Non-linear acceleration curve
-        let progress = min(currentDragDistance / accelerationRadius, 1.0)
+        // Otherwise, use slow speed if active
+        if isInPrecisionMode && slowSpeedEnabled {
+            return precisionFactor
+        }
         
-        // Cubic easing function for non-linear acceleration
-        // Slow increase near start, faster increase with distance
-        let easedProgress = progress * progress * (3.0 - 2.0 * progress)
-        
-        // For drag acceleration: start slower than base, accelerate to normal speed (factor 1.0)
-        // Use at least 2x slower (factor 2.0) as starting point for drag acceleration
-        let dragStartFactor = max(baseFactor, 2.0)
-        return dragStartFactor * (1.0 - easedProgress) + 1.0 * easedProgress
+        // Normal speed when no modifiers
+        return normalSpeedFactor
     }
     
     private func startDragTracking(at position: CGPoint) {
         isDragging = true
         currentDragDistance = 0.0
-        logger.debug("Started drag tracking")
+        
+        // Reset accumulators for clean drag tracking
+        accumulatedX = 0.0
+        accumulatedY = 0.0
+        
+        // Initialize cursor position for drag acceleration if not already tracking
+        if lastCursorPosition == .zero {
+            let nsEventPosition = NSEvent.mouseLocation
+            // Convert from NSEvent coordinates (bottom-left origin) to CG coordinates (top-left origin)
+            if let mainScreen = NSScreen.main {
+                lastCursorPosition = CGPoint(
+                    x: nsEventPosition.x,
+                    y: mainScreen.frame.height - nsEventPosition.y
+                )
+            } else {
+                lastCursorPosition = nsEventPosition
+            }
+        }
+        
+        logger.info("Started drag tracking")
     }
     
     private func stopDragTracking() {
         isDragging = false
         currentDragDistance = 0.0
-        logger.debug("Stopped drag tracking")
+        
+        // Reset cursor position if not in precision mode
+        if !isInPrecisionMode {
+            lastCursorPosition = .zero
+        }
+        
+        logger.info("Stopped drag tracking")
     }
     
     private func getCursorPosition() -> CGPoint {
