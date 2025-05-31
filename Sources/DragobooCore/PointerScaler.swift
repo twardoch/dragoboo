@@ -18,6 +18,10 @@ public class PointerScaler {
     private var fnEventsReceived = 0
     private var scalingEventsApplied = 0
     
+    // FRACTIONAL MOVEMENT ACCUMULATION
+    private var accumulatedX: Double = 0.0
+    private var accumulatedY: Double = 0.0
+    
     public var onPrecisionModeChange: ((Bool) -> Void)?
     
     private static let fnKeyCode: CGKeyCode = 0x3F
@@ -72,9 +76,9 @@ public class PointerScaler {
         // Use the main run loop for event tap to ensure proper event capture
         let mainRunLoop = CFRunLoopGetMain()
         
-        // Create event tap with session event tap location
+        // TRY DIFFERENT EVENT TAP LOCATION - HID instead of Session
         guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
+            tap: .cgSessionEventTap,  // Back to Session but test double fields
             place: .headInsertEventTap,
             options: .defaultTap,
             eventsOfInterest: eventMask,
@@ -92,24 +96,25 @@ public class PointerScaler {
             throw PointerScalerError.failedToCreateEventTap
         }
         
-        logger.debug("Event tap created ✅ at location=\(CGEventTapLocation.cgSessionEventTap.rawValue)")
+        eventTap = tap
+        
+        logger.debug("Event tap created ✅ at location=Session")
         
         // Create run loop source and add to main run loop
-        guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else {
+        guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap!, 0) else {
             logger.error("Failed to create run loop source")
-            CGEvent.tapEnable(tap: tap, enable: false)
-            CFMachPortInvalidate(tap)
+            CGEvent.tapEnable(tap: eventTap!, enable: false)
+            CFMachPortInvalidate(eventTap!)
             throw PointerScalerError.failedToCreateEventTap
         }
         
-        eventTap = tap
         runLoopSource = source
         
         // Add source to main run loop (critical fix)
         CFRunLoopAddSource(mainRunLoop, source, .commonModes)
         
         // Enable the event tap
-        CGEvent.tapEnable(tap: tap, enable: true)
+        CGEvent.tapEnable(tap: eventTap!, enable: true)
         
         print("PointerScaler: Event tap enabled successfully")
         logger.info("Event tap enabled successfully")
@@ -172,17 +177,30 @@ public class PointerScaler {
             handleFlagsChanged(event: event)
             
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
-            print("PointerScaler: Received mouse movement event")
-            updateFnKeyState()
-            if fnKeyPressed {
-                print("PointerScaler: fn key is pressed, scaling mouse movement")
-                let wasScaled = scaleMouseMovement(event: event)
+            self.totalEventsReceived += 1
+            logger.notice("🖱️ MOUSE EVENT #\(self.totalEventsReceived): \(self.debugEventType(type))")
+            print("PointerScaler: 🖱️ MOUSE EVENT #\(self.totalEventsReceived): \(self.debugEventType(type))")
+            
+            self.updateFnKeyState()
+            logger.notice("🔑 FN KEY STATE: \(self.fnKeyPressed ? "PRESSED ✅" : "NOT PRESSED ❌")")
+            print("PointerScaler: 🔑 FN KEY STATE: \(self.fnKeyPressed ? "PRESSED ✅" : "NOT PRESSED ❌")")
+            
+            if self.fnKeyPressed {
+                logger.notice("🎯 ATTEMPTING TO SCALE MOUSE MOVEMENT...")
+                print("PointerScaler: 🎯 ATTEMPTING TO SCALE MOUSE MOVEMENT...")
+                let wasScaled = self.scaleMouseMovement(event: event)
                 if wasScaled {
                     self.scaledEventCount += 1
-                    scalingEventsApplied += 1
-                    print("PointerScaler: Applied mouse scaling with fn key pressed (total scaled: \(self.scaledEventCount))")
-                    logger.info("Applied mouse scaling with fn key pressed (total scaled: \(self.scaledEventCount))")
+                    self.scalingEventsApplied += 1
+                    logger.notice("✅ SCALING APPLIED! Total scaled: \(self.scalingEventsApplied)")
+                    print("PointerScaler: ✅ SCALING APPLIED! Total scaled: \(self.scalingEventsApplied)")
+                } else {
+                    logger.error("❌ SCALING FAILED!")
+                    print("PointerScaler: ❌ SCALING FAILED!")
                 }
+            } else {
+                logger.notice("⭕ FN KEY NOT PRESSED - NO SCALING")
+                print("PointerScaler: ⭕ FN KEY NOT PRESSED - NO SCALING")
             }
             
         case .scrollWheel:
@@ -238,7 +256,7 @@ public class PointerScaler {
     }
     
     private func handleFlagsChanged(event: CGEvent) {
-        // Method 1: Check keycode directly (FN key is keycode 63/0x3F)
+        // Check keycode directly (FN key is keycode 63/0x3F)
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         let flags = event.flags
         
@@ -246,23 +264,34 @@ public class PointerScaler {
         logger.debug("Flags breakdown: cmd=\(flags.contains(.maskCommand)), opt=\(flags.contains(.maskAlternate)), ctrl=\(flags.contains(.maskControl)), shift=\(flags.contains(.maskShift)), fn=\(flags.contains(.maskSecondaryFn))")
         
         if keyCode == 63 {
-            fnKeyPressed = !fnKeyPressed  // Toggle state
-            logger.notice("FN key toggled via keycode 63: \(self.fnKeyPressed ? "PRESSED" : "RELEASED")")
-            onPrecisionModeChange?(fnKeyPressed)
+            // Fixed: Use actual flag state instead of toggle
+            let wasFnPressed = fnKeyPressed
+            fnKeyPressed = flags.contains(.maskSecondaryFn)
+            
+            if wasFnPressed != fnKeyPressed {
+                logger.notice("FN key state changed via keycode 63: \(self.fnKeyPressed ? "PRESSED" : "RELEASED")")
+                onPrecisionModeChange?(fnKeyPressed)
+                
+                // Reset accumulation when switching modes
+                accumulatedX = 0.0
+                accumulatedY = 0.0
+                logger.debug("Cleared fractional accumulation on fn key state change (flags)")
+            }
             return
         }
         
-        // Method 2: Enhanced fallback with both flags and polling
+        // Fallback: Check flag state directly without polling to avoid race conditions
         let wasFnPressed = fnKeyPressed
-        
-        // Use combined detection method
-        let fnDown = flags.contains(.maskSecondaryFn) || CGEventSource.keyState(.combinedSessionState, key: 0x3F)
-        
-        fnKeyPressed = fnDown
+        fnKeyPressed = flags.contains(.maskSecondaryFn)
         
         if wasFnPressed != fnKeyPressed {
-            logger.notice("Fn key state changed via flags/polling: \(self.fnKeyPressed ? "PRESSED" : "RELEASED") (flags=\(flags.contains(.maskSecondaryFn)), polling=\(CGEventSource.keyState(.combinedSessionState, key: 0x3F)))")
+            logger.notice("Fn key state changed via flags: \(self.fnKeyPressed ? "PRESSED" : "RELEASED")")
             onPrecisionModeChange?(fnKeyPressed)
+            
+            // Reset accumulation when switching modes
+            accumulatedX = 0.0
+            accumulatedY = 0.0
+            logger.debug("Cleared fractional accumulation on fn key state change (flags fallback)")
         }
     }
     
@@ -275,69 +304,124 @@ public class PointerScaler {
         if wasFnPressed != fnKeyPressed {
             logger.notice("Fn key state updated via polling: \(self.fnKeyPressed ? "PRESSED" : "RELEASED")")
             onPrecisionModeChange?(fnKeyPressed)
+            
+            // Reset accumulation when switching modes to prevent jumps
+            accumulatedX = 0.0
+            accumulatedY = 0.0
+            logger.debug("Cleared fractional accumulation on fn key state change")
         }
     }
     
     private func scaleMouseMovement(event: CGEvent) -> Bool {
-        // Use the correct field constants as suggested by expert analysis
-        let deltaX = event.getDoubleValueField(.mouseEventDeltaX)
-        let deltaY = event.getDoubleValueField(.mouseEventDeltaY)
+        logger.notice("🔄 ENTERING scaleMouseMovement function")
+        print("PointerScaler: 🔄 ENTERING scaleMouseMovement function")
         
-        // Only scale if there's actual movement (non-zero deltas)
-        guard deltaX != 0.0 || deltaY != 0.0 else {
-            logger.debug("Skipping scaling - no movement deltas")
+        // TEST ALL FIELD ACCESS METHODS (from TODO.md)
+        let deltaX_int = event.getIntegerValueField(.mouseEventDeltaX)
+        let deltaY_int = event.getIntegerValueField(.mouseEventDeltaY)
+        let deltaX_double = event.getDoubleValueField(.mouseEventDeltaX)
+        let deltaY_double = event.getDoubleValueField(.mouseEventDeltaY)
+        
+        logger.notice("📊 FIELD COMPARISON:")
+        logger.notice("   Integer: X=\(deltaX_int), Y=\(deltaY_int)")
+        logger.notice("   Double:  X=\(deltaX_double), Y=\(deltaY_double)")
+        print("PointerScaler: 📊 FIELD COMPARISON: Integer(\(deltaX_int),\(deltaY_int)) Double(\(deltaX_double),\(deltaY_double))")
+        
+        guard deltaX_int != 0 || deltaY_int != 0 else {
+            logger.notice("⭕ NO MOVEMENT - SKIPPING")
+            print("PointerScaler: ⭕ NO MOVEMENT - SKIPPING")
             return false
         }
         
-        logger.debug("Original deltas: X=\(deltaX), Y=\(deltaY), Factor=\(self.precisionFactor)")
+        // EXTREME SCALING FACTOR (from TODO.md) - Make effect super obvious
+        let extremeFactor = 20.0  // 20x slower instead of user factor!
         
-        let scaledDeltaX = deltaX / precisionFactor
-        let scaledDeltaY = deltaY / precisionFactor
+        // Try DOUBLE FIELDS approach
+        let scaledMovementX_double = deltaX_double / extremeFactor
+        let scaledMovementY_double = deltaY_double / extremeFactor
         
-        // Set the scaled values using the correct field constants
-        event.setDoubleValueField(.mouseEventDeltaX, value: scaledDeltaX)
-        event.setDoubleValueField(.mouseEventDeltaY, value: scaledDeltaY)
+        logger.notice("🚨 EXTREME SCALING TEST (20x slower):")
+        logger.notice("   Original doubles: (\(deltaX_double),\(deltaY_double))")
+        logger.notice("   Scaled doubles: (\(scaledMovementX_double),\(scaledMovementY_double))")
         
-        // Verify the values were actually set (critical verification step)
-        let verifyX = event.getDoubleValueField(.mouseEventDeltaX)
-        let verifyY = event.getDoubleValueField(.mouseEventDeltaY)
-        logger.debug("Scaled deltas applied: X=\(verifyX), Y=\(verifyY)")
+        // FIRST: Try setting DOUBLE fields directly
+        event.setDoubleValueField(.mouseEventDeltaX, value: scaledMovementX_double)
+        event.setDoubleValueField(.mouseEventDeltaY, value: scaledMovementY_double)
         
-        // Additional verification that the scaling actually took effect
-        let scalingWorked = abs(verifyX - scaledDeltaX) < 0.001 && abs(verifyY - scaledDeltaY) < 0.001
-        if !scalingWorked {
-            logger.error("CRITICAL: Delta scaling failed! Expected X=\(scaledDeltaX), Y=\(scaledDeltaY), but got X=\(verifyX), Y=\(verifyY)")
+        // Verify double field setting
+        let verifyX_double = event.getDoubleValueField(.mouseEventDeltaX)
+        let verifyY_double = event.getDoubleValueField(.mouseEventDeltaY)
+        
+        logger.notice("🔍 DOUBLE FIELD TEST:")
+        logger.notice("   Set: (\(scaledMovementX_double),\(scaledMovementY_double))")
+        logger.notice("   Got: (\(verifyX_double),\(verifyY_double))")
+        
+        let doubleSuccess = abs(verifyX_double - scaledMovementX_double) < 0.001 && abs(verifyY_double - scaledMovementY_double) < 0.001
+        
+        if doubleSuccess {
+            logger.notice("✅ DOUBLE FIELDS WORKED!")
+            print("PointerScaler: ✅ DOUBLE FIELDS WORKED! Set(\(scaledMovementX_double),\(scaledMovementY_double)) Got(\(verifyX_double),\(verifyY_double))")
         } else {
-            logger.debug("Delta scaling verified successful")
+            logger.warning("❌ DOUBLE FIELDS FAILED - trying integer fallback")
+            print("PointerScaler: ❌ DOUBLE FIELDS FAILED")
+            
+            // FALLBACK: Try integer fields with extreme scaling
+            let scaledX_int = Int64(deltaX_double / extremeFactor)
+            let scaledY_int = Int64(deltaY_double / extremeFactor)
+            
+            logger.notice("🔄 INTEGER FALLBACK:")
+            logger.notice("   Scaled integers: (\(scaledX_int),\(scaledY_int))")
+            
+            event.setIntegerValueField(.mouseEventDeltaX, value: scaledX_int)
+            event.setIntegerValueField(.mouseEventDeltaY, value: scaledY_int)
+            
+            let verifyX_int = event.getIntegerValueField(.mouseEventDeltaX)
+            let verifyY_int = event.getIntegerValueField(.mouseEventDeltaY)
+            
+            logger.notice("   Set: (\(scaledX_int),\(scaledY_int))")
+            logger.notice("   Got: (\(verifyX_int),\(verifyY_int))")
+            
+            let intSuccess = verifyX_int == scaledX_int && verifyY_int == scaledY_int
+            logger.notice("🎯 INTEGER SCALING \(intSuccess ? "SUCCESS" : "FAILED")")
+            print("PointerScaler: 🎯 INTEGER SCALING \(intSuccess ? "SUCCESS" : "FAILED")")
+            
+            return intSuccess
         }
         
-        return scalingWorked
+        // Reset instant mouser to prevent WindowServer corrections
+        event.setIntegerValueField(.mouseEventInstantMouser, value: 0)
+        
+        logger.notice("🎯 EXTREME SCALING COMPLETE - 20x SLOWER!")
+        print("PointerScaler: 🎯 EXTREME SCALING COMPLETE - 20x SLOWER!")
+        
+        return doubleSuccess
     }
     
     private func scaleScrollWheel(event: CGEvent) -> Bool {
-        let deltaAxis1 = event.getDoubleValueField(.scrollWheelEventDeltaAxis1)
-        let deltaAxis2 = event.getDoubleValueField(.scrollWheelEventDeltaAxis2)
+        // Try integer fields first for scroll wheel deltas
+        let deltaAxis1 = event.getIntegerValueField(.scrollWheelEventDeltaAxis1)
+        let deltaAxis2 = event.getIntegerValueField(.scrollWheelEventDeltaAxis2)
         
         // Only scale if there's actual scroll movement (non-zero deltas)
-        guard deltaAxis1 != 0.0 || deltaAxis2 != 0.0 else {
+        guard deltaAxis1 != 0 || deltaAxis2 != 0 else {
             return false
         }
         
-        let scaledDelta1 = deltaAxis1 / precisionFactor
-        let scaledDelta2 = deltaAxis2 / precisionFactor
+        let scaledDelta1 = Int64(Double(deltaAxis1) / precisionFactor)
+        let scaledDelta2 = Int64(Double(deltaAxis2) / precisionFactor)
         
         logger.debug("Scaling scroll: (\(deltaAxis1), \(deltaAxis2)) -> (\(scaledDelta1), \(scaledDelta2)) with factor \(self.precisionFactor)")
         
-        event.setDoubleValueField(.scrollWheelEventDeltaAxis1, value: scaledDelta1)
-        event.setDoubleValueField(.scrollWheelEventDeltaAxis2, value: scaledDelta2)
+        event.setIntegerValueField(.scrollWheelEventDeltaAxis1, value: scaledDelta1)
+        event.setIntegerValueField(.scrollWheelEventDeltaAxis2, value: scaledDelta2)
         
         // Verify scroll scaling
-        let verifyDelta1 = event.getDoubleValueField(.scrollWheelEventDeltaAxis1)
-        let verifyDelta2 = event.getDoubleValueField(.scrollWheelEventDeltaAxis2)
-        let scrollScalingWorked = abs(verifyDelta1 - scaledDelta1) < 0.001 && abs(verifyDelta2 - scaledDelta2) < 0.001
+        let verifyDelta1 = event.getIntegerValueField(.scrollWheelEventDeltaAxis1)
+        let verifyDelta2 = event.getIntegerValueField(.scrollWheelEventDeltaAxis2)
+        let scrollScalingWorked = verifyDelta1 == scaledDelta1 && verifyDelta2 == scaledDelta2
         
         if !scrollScalingWorked {
-            logger.error("CRITICAL: Scroll scaling failed!")
+            logger.error("CRITICAL: Scroll scaling failed! Expected (\(scaledDelta1), \(scaledDelta2)), got (\(verifyDelta1), \(verifyDelta2))")
         }
         
         return scrollScalingWorked
