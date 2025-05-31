@@ -1,166 +1,191 @@
 # Dragoboo Development Plan
 
-## Phase 1: Research & Architecture
+## Current Status Summary
 
-[ ] Analyze CGEventTap API documentation for mouse event interception
-[ ] Research fn key detection methods (CGEventFlags vs keyState polling)
-[ ] Investigate accessibility permission handling and user flow
-[ ] Document technical constraints and edge cases
-[ ] Design modular architecture (DragobooCore + DragobooApp)
-[ ] Create system architecture diagram
-[ ] Define public API surface for DragobooCore
-[ ] Research battery impact mitigation strategies
+Based on the current codebase analysis, Dragoboo has a solid foundation with the core architecture, SwiftUI interface, and basic event tap functionality implemented. The main challenges are related to event modification reliability and system-level integration.
 
-## Phase 2: Project Setup & Infrastructure
+## Immediate Priorities (Current Sprint)
 
-[ ] Create Xcode project with macOS app template
-[ ] Configure SwiftUI lifecycle and minimum deployment target (macOS 13.0)
-[ ] Set up Swift Package Manager structure
-[ ] Create DragobooCore package with proper module organization
-[ ] Configure code signing and Developer ID certificate
-[ ] Set up SwiftLint with appropriate rules
-[ ] Configure swift-format for code consistency
-[ ] Create .gitignore with Xcode/Swift patterns
-[ ] Initialize git repository with proper structure
+### Critical Issues to Resolve
 
-## Phase 3: Core Functionality Implementation
+- [ ] **Fix event modification reliability** - Double field modifications are failing, need to investigate integer field approach with accumulation
+- [ ] **Resolve secured input mode conflicts** - App fails when secure input is active
+- [ ] **Improve fn key detection consistency** - Current polling vs flags approach has timing issues
+- [ ] **Add proper accumulation logic** - Small movements are being lost due to integer truncation
 
-[ ] Implement PointerScalerActor for thread-safe event processing
-[ ] Create CGEventTap wrapper with proper error handling
-[ ] Implement mouse delta scaling algorithm
-[ ] Add fn key detection via maskSecondaryFn flag
-[ ] Create fallback keyState polling for fn key
-[ ] Implement event tap lifecycle management
-[ ] Add automatic re-enable for disabled taps
-[ ] Create scaling factor validation (0.5-10x range)
-[ ] Implement smooth transition between normal/precision modes
-[ ] Add support for all mouse event types (move, drag, scroll)
+### Phase 1: Core Functionality Fixes ⚠️ URGENT
 
-## Phase 4: Modifier Key Management
+✅ Basic event tap creation and management  
+✅ fn key detection (polling and flags)  
+✅ Mouse movement event interception  
+✅ Scroll wheel event handling
 
-[ ] Create KeyStateManager for modifier tracking
-[ ] Implement flagsChanged event monitoring
-[ ] Add support for custom modifier keys beyond fn
-[ ] Create modifier key combination support
-[ ] Implement edge case handling for stuck keys
-[ ] Add modifier state persistence across app switches
-[ ] Create debugging output for key state changes
+- [ ] **Fix double field modification failures** - Core scaling not working properly
+- [ ] **Implement proper fractional accumulation** - Prevent movement loss on slow movements
+- [ ] **Add robust integer field fallback** - When double fields fail
+- [ ] **Optimize event processing performance** - Currently processing every movement event
+- [ ] **Handle secure input mode gracefully** - Detect and warn users when it's active
 
-## Phase 5: User Interface Development
+### Phase 2: System Integration & Stability
 
-[ ] Design MenuBarExtra with SwiftUI
-[ ] Create status bar icon (normal vs active states)
-[ ] Implement preferences sheet UI
-[ ] Add precision factor slider/stepper control
-[ ] Create modifier key selection interface
-[ ] Implement live preview of settings changes
-[ ] Add visual feedback for precision mode activation
-[ ] Design onboarding flow for first launch
-[ ] Create accessibility permission request UI
+✅ Basic accessibility permission checking  
+✅ AXIsProcessTrusted integration  
+✅ MenuBarExtra UI implementation
 
-## Phase 6: System Integration
+- [ ] **Add system sleep/wake event handling** - Event tap may need restarting
+- [ ] **Implement proper cleanup on app termination** - Ensure event tap is disabled
+- [ ] **Add display configuration change support** - Multiple monitor setups
+- [ ] **Create LaunchAgent for startup** - Allow app to start automatically
+- [ ] **Handle event tap timeout/disable gracefully** - Auto-recovery mechanisms
 
-[ ] Implement accessibility permission checking
-[ ] Create AXIsProcessTrustedWithOptions wrapper
-[ ] Add permission status monitoring
-[ ] Implement graceful degradation without permissions
-[ ] Create LaunchAgent for login startup
-[ ] Add proper app termination cleanup
-[ ] Implement system sleep/wake handling
-[ ] Add display configuration change support
+### Phase 3: User Experience Improvements
 
-## Phase 7: Performance Optimization
+✅ Basic SwiftUI preferences interface  
+✅ Precision factor slider (1x-10x)  
+✅ Visual status indicators  
+✅ Accessibility permission UI flow
 
-[ ] Profile event tap callback performance
-[ ] Implement sub-1ms callback execution
-[ ] Add event rate limiting (120 Hz max)
-[ ] Create dedicated high-priority dispatch queue
-[ ] Minimize CPU usage when idle
-[ ] Implement memory usage monitoring
-[ ] Add performance metrics logging
-[ ] Optimize for battery efficiency
+- [ ] **Add visual feedback for precision mode** - More obvious when active
+- [ ] **Implement better onboarding flow** - Guide users through setup
+- [ ] **Create status bar icon variants** - Different icons for different states
+- [ ] **Add keyboard shortcuts** - Quick access to common functions
+- [ ] **Implement settings persistence validation** - Ensure settings survive app updates
 
-## Phase 8: Persistence & Configuration
+## Phase 4: Advanced Features & Polish
 
-[ ] Implement UserDefaults integration with @AppStorage
-[ ] Create settings migration system
-[ ] Add configuration import/export
-[ ] Implement preset management
-[ ] Create per-application settings support
-[ ] Add backup/restore functionality
+### Event Processing Enhancements
 
-## Phase 9: Error Handling & Logging
+- [ ] **Add support for custom modifier keys** - Beyond just fn key
+- [ ] **Implement modifier key combinations** - fn+shift, fn+cmd, etc.
+- [ ] **Create per-application settings** - Different factors for different apps
+- [ ] **Add sensitivity curves** - Non-linear scaling options
+- [ ] **Implement gesture detection** - Smart scaling based on movement patterns
 
-[ ] Set up os.Logger infrastructure
-[ ] Implement comprehensive error handling
-[ ] Create user-friendly error messages
-[ ] Add crash reporting integration
-[ ] Implement diagnostic data collection
-[ ] Create debug mode with verbose logging
-[ ] Add event tap failure recovery
+### Performance & Diagnostics
 
-## Phase 10: Testing Strategy
+- [ ] **Add performance profiling** - Monitor callback execution time
+- [ ] **Implement battery usage optimization** - Reduce background CPU usage
+- [ ] **Create diagnostic mode** - Detailed logging for troubleshooting
+- [ ] **Add memory usage monitoring** - Prevent memory leaks
+- [ ] **Implement event rate limiting** - Prevent overwhelming the system
 
-[ ] Write unit tests for scaling math
-[ ] Create integration tests for event processing
-[ ] Implement UI tests for preferences
-[ ] Add performance benchmarks
-[ ] Test with multiple input devices
-[ ] Verify behavior across macOS versions
-[ ] Test with external keyboards (fn key compatibility)
-[ ] Create automated test suite
+### Testing & Quality Assurance
 
-## Phase 11: Edge Cases & Compatibility
+✅ Basic unit tests for PointerScaler
 
-[ ] Handle multiple displays with different DPIs
-[ ] Test with gaming mice (high DPI)
-[ ] Verify Magic Trackpad compatibility
-[ ] Handle Bluetooth disconnection/reconnection
-[ ] Test with Touch Bar MacBooks
-[ ] Verify M1/M2/M3 compatibility
-[ ] Handle full screen games/apps
-[ ] Test with virtual machines
+- [ ] **Expand test coverage** - Integration tests for event processing
+- [ ] **Add performance benchmarks** - Ensure consistent performance
+- [ ] **Test with multiple input devices** - External mice, trackpads, etc.
+- [ ] **Verify behavior across macOS versions** - Compatibility testing
+- [ ] **Test with external keyboards** - fn key compatibility issues
 
-## Phase 12: Documentation
+## Phase 5: Distribution & Deployment
 
-[ ] Write comprehensive README
-[ ] Create user guide with screenshots
-[ ] Document accessibility setup process
-[ ] Write API documentation for DragobooCore
-[ ] Create troubleshooting guide
-[ ] Document known limitations
-[ ] Write contribution guidelines
-[ ] Create changelog structure
+### Code Signing & Security
 
-## Phase 13: Distribution & Packaging
+- [ ] **Configure Developer ID certificate** - Required for distribution
+- [ ] **Set up hardened runtime** - Security requirements
+- [ ] **Implement notarization workflow** - Apple's security validation
+- [ ] **Add privacy manifest** - Required for App Store submission
+- [ ] **Configure sandboxing** - If targeting App Store
 
-[ ] Configure hardened runtime
-[ ] Set up notarization workflow
-[ ] Create DMG installer with background
-[ ] Implement auto-update mechanism (Sparkle)
-[ ] Create Homebrew cask formula
-[ ] Set up GitHub releases automation
-[ ] Create installation verification
-[ ] Implement license validation (if commercial)
+### Packaging & Installation
 
-## Phase 14: Quality Assurance
+✅ Basic .app bundle creation via run.sh  
+✅ Makefile for build automation
 
-[ ] Perform thorough manual testing
-[ ] Run static analysis tools
-[ ] Check for memory leaks
-[ ] Verify accessibility compliance
-[ ] Test localization support
-[ ] Validate security best practices
-[ ] Performance regression testing
-[ ] User acceptance testing
+- [ ] **Create DMG installer** - Professional distribution package
+- [ ] **Set up Homebrew cask** - Package manager integration
+- [ ] **Implement auto-update mechanism** - Sparkle or custom solution
+- [ ] **Create uninstaller script** - Clean removal of components
+- [ ] **Add installation verification** - Ensure proper setup
 
-## Phase 15: Release & Post-Launch
+### Documentation & Support
 
-[ ] Create marketing website
-[ ] Set up user feedback channels
-[ ] Implement analytics (privacy-respecting)
-[ ] Create support documentation
-[ ] Monitor crash reports
-[ ] Plan feature roadmap
-[ ] Set up community forum
-[ ] Establish update cadence
+✅ Comprehensive README with usage instructions  
+✅ Technical documentation in README
+
+- [ ] **Create user guide with screenshots** - Step-by-step setup guide
+- [ ] **Write troubleshooting guide** - Common issues and solutions
+- [ ] **Document API for DragobooCore** - Enable third-party integration
+- [ ] **Create contribution guidelines** - Open source development
+- [ ] **Set up issue templates** - Structured bug reporting
+
+## Phase 6: Advanced System Integration
+
+### Display & Input Device Support
+
+- [ ] **Handle multiple displays with different DPIs** - Scale appropriately per display
+- [ ] **Support gaming mice with high DPI** - Handle extreme sensitivity settings
+- [ ] **Verify Magic Trackpad compatibility** - Apple's external trackpad
+- [ ] **Handle Bluetooth device disconnection** - Graceful handling of wireless devices
+- [ ] **Test with Touch Bar MacBooks** - Ensure fn key works properly
+
+### System Events & Power Management
+
+- [ ] **Implement system sleep/wake handling** - Restart event tap after wake
+- [ ] **Add display configuration change support** - Handle monitor connect/disconnect
+- [ ] **Handle user switching** - Multiple user accounts
+- [ ] **Implement idle detection** - Reduce resource usage when inactive
+- [ ] **Add thermal throttling awareness** - Reduce CPU usage when system is hot
+
+## Phase 7: Future Enhancements
+
+### Advanced Features
+
+- [ ] **Add gesture-based scaling** - Different factors for different movement types
+- [ ] **Implement predictive scaling** - AI-based movement prediction
+- [ ] **Create preset management** - Save/load different configurations
+- [ ] **Add integration with other tools** - BTT, Karabiner, etc.
+- [ ] **Implement remote configuration** - Sync settings across devices
+
+### Analytics & Monitoring
+
+- [ ] **Add privacy-respecting usage analytics** - Understand how users interact
+- [ ] **Implement crash reporting** - Automatic error reporting
+- [ ] **Create usage statistics** - Help improve the user experience
+- [ ] **Set up performance monitoring** - Track performance over time
+- [ ] **Add A/B testing framework** - Test new features safely
+
+## Known Issues & Technical Debt
+
+### Current Problems
+
+1. **Double field modification failure** - Event modification not working reliably
+2. **Secure input mode conflicts** - App doesn't work with secure input active
+3. **Fractional movement loss** - Small movements are truncated to zero
+4. **Event processing overhead** - Processing every mouse movement event
+5. **fn key detection inconsistencies** - Timing issues between polling and flags
+
+### Technical Debt
+
+1. **Excessive debug logging** - Too much output in production builds
+2. **Hard-coded scaling factors** - Should be configurable
+3. **Missing error recovery** - Event tap failures not handled gracefully
+4. **Lack of configuration validation** - Invalid settings not prevented
+5. **Memory usage not monitored** - Potential for memory leaks
+
+## Development Guidelines
+
+### Code Quality Standards
+
+- Follow Swift API design guidelines and naming conventions
+- Use proper error handling with Result types where appropriate
+- Implement comprehensive logging with appropriate levels
+- Write unit tests for all core functionality
+- Use property wrappers (@AppStorage, @Published) appropriately
+
+### Performance Requirements
+
+- Event tap callback execution must be under 1ms
+- Memory usage should remain stable over long periods
+- CPU usage should be minimal when precision mode is inactive
+- Battery impact should be negligible
+
+### Security & Privacy
+
+- Request minimal necessary permissions
+- Handle accessibility permissions gracefully
+- Implement proper cleanup on termination
+- Respect user privacy - no data collection without consent
+- Follow Apple's security best practices

@@ -149,7 +149,7 @@ print_status "App bundle created at: $APP_BUNDLE_PATH"
 EXECUTABLE_PATH="$MACOS_DIR/$EXECUTABLE_NAME"
 APP_LAUNCH_PATH="$APP_BUNDLE_PATH"
 
-repomix -o llms.txt -i .specstory,_private,.cursorrules,CLAUDE.md
+repomix -o llms.txt -i .specstory,_private,.cursorrules,CLAUDE.md,PLAN.md,TODO.md
 tree >>llms.txt
 
 # Exit here if --no-launch was specified
