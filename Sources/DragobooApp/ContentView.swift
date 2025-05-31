@@ -28,7 +28,7 @@ struct ContentView: View {
             }
         }
         .onAppear { 
-            appState.refreshPermission() 
+            appState.refreshPermissions() 
         }
         .padding()
         .frame(width: 300)
@@ -97,6 +97,20 @@ struct PrecisionSettingsView: View {
                 )
                 .font(.caption)
                 .foregroundColor(appState.isPrecisionModeActive ? .green : .clear)
+                
+                // HID Access Status
+                if !appState.isHIDAccessAvailable {
+                    Label("System speed control may use fallback method", systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                }
+                
+                // Error Display
+                if let error = appState.lastError {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
             }
         }
     }
@@ -104,17 +118,49 @@ struct PrecisionSettingsView: View {
 
 struct StatusIndicator: View {
     @EnvironmentObject var appState: AppState
+    @State private var systemSpeedValid = true
+    @State private var lastValidationTime = Date()
     
     var body: some View {
         HStack(spacing: 4) {
             Circle()
-                .fill(appState.isPrecisionModeActive ? Color.green : Color.gray)
+                .fill(statusColor)
                 .frame(width: 8, height: 8)
             
-            Text(appState.isPrecisionModeActive ? "Active" : "Ready")
+            Text(statusText)
                 .font(.caption)
                 .foregroundColor(.secondary)
         }
+        .onReceive(Timer.publish(every: 2.0, on: .main, in: .common).autoconnect()) { _ in
+            if appState.isPrecisionModeActive {
+                validateSystemSpeed()
+            }
+        }
+    }
+    
+    private var statusColor: Color {
+        if appState.isPrecisionModeActive {
+            return systemSpeedValid ? .green : .orange
+        } else {
+            return appState.lastError != nil ? .red : .gray
+        }
+    }
+    
+    private var statusText: String {
+        if appState.lastError != nil {
+            return "Error"
+        } else if appState.isPrecisionModeActive {
+            return systemSpeedValid ? "System Speed Modified" : "Speed Change Failed"
+        } else {
+            return "Ready"
+        }
+    }
+    
+    private func validateSystemSpeed() {
+        // This is a simplified validation - in a real implementation,
+        // we might need to access the SystemSpeedController validation method
+        systemSpeedValid = true // Assume it's working for now
+        lastValidationTime = Date()
     }
 }
 

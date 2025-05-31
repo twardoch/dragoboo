@@ -10,17 +10,10 @@ public class PointerScaler {
     private var runLoopSource: CFRunLoopSource?
     private var precisionFactor: Double
     private var fnKeyPressed = false
+    private var isInPrecisionMode = false
     private let logger = Logger(subsystem: "com.dragoboo.core", category: "PointerScaler")
     private var debugTimer: Timer?
-    private var eventCount = 0
-    private var scaledEventCount = 0
-    private var totalEventsReceived = 0
-    private var fnEventsReceived = 0
-    private var scalingEventsApplied = 0
-    
-    // FRACTIONAL MOVEMENT ACCUMULATION
-    private var accumulatedX: Double = 0.0
-    private var accumulatedY: Double = 0.0
+    private var systemSpeedController: SystemSpeedController
     
     public var onPrecisionModeChange: ((Bool) -> Void)?
     
@@ -28,6 +21,7 @@ public class PointerScaler {
     
     public init(precisionFactor: Double) {
         self.precisionFactor = precisionFactor
+        self.systemSpeedController = SystemSpeedController()
     }
     
     private func addDiagnostics() {
@@ -50,6 +44,10 @@ public class PointerScaler {
         print("PointerScaler: Starting pointer scaler...")
         logger.info("Starting pointer scaler...")
         
+        // Reset state on start
+        fnKeyPressed = false
+        isInPrecisionMode = false
+        
         // Check accessibility permissions first
         guard AXIsProcessTrusted() else {
             print("PointerScaler: Accessibility permissions not granted")
@@ -62,12 +60,8 @@ public class PointerScaler {
         // Check for secure input mode which can block event modifications
         checkSecureInputMode()
         
-        let eventMask: CGEventMask = (1 << CGEventType.mouseMoved.rawValue) |
-                                     (1 << CGEventType.leftMouseDragged.rawValue) |
-                                     (1 << CGEventType.rightMouseDragged.rawValue) |
-                                     (1 << CGEventType.otherMouseDragged.rawValue) |
-                                     (1 << CGEventType.scrollWheel.rawValue) |
-                                     (1 << CGEventType.flagsChanged.rawValue) |
+        // Only listen for flags changed events (for fn key detection) and tap management events
+        let eventMask: CGEventMask = (1 << CGEventType.flagsChanged.rawValue) |
                                      (1 << CGEventType.tapDisabledByTimeout.rawValue) |
                                      (1 << CGEventType.tapDisabledByUserInput.rawValue)
         
@@ -76,9 +70,9 @@ public class PointerScaler {
         // Use the main run loop for event tap to ensure proper event capture
         let mainRunLoop = CFRunLoopGetMain()
         
-        // TRY DIFFERENT EVENT TAP LOCATION - HID instead of Session
+        // Create event tap for fn key detection only
         guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,  // Back to Session but test double fields
+            tap: .cgSessionEventTap,
             place: .headInsertEventTap,
             options: .defaultTap,
             eventsOfInterest: eventMask,
@@ -98,7 +92,7 @@ public class PointerScaler {
         
         eventTap = tap
         
-        logger.debug("Event tap created ✅ at location=Session")
+        logger.info("Event tap created for fn key detection")
         
         // Create run loop source and add to main run loop
         guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap!, 0) else {
@@ -130,6 +124,17 @@ public class PointerScaler {
         debugTimer?.invalidate()
         debugTimer = nil
         
+        // Restore original system speeds if in precision mode
+        if isInPrecisionMode {
+            do {
+                try systemSpeedController.restoreOriginalSpeed()
+                isInPrecisionMode = false
+                logger.info("Restored original system speeds on stop")
+            } catch {
+                logger.error("Failed to restore original speeds on stop: \(error)")
+            }
+        }
+        
         if let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: false)
             CFMachPortInvalidate(tap)
@@ -159,74 +164,22 @@ public class PointerScaler {
     }
     
     private func handleEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
-        // Ensure we're processing events consistently (removed strict main thread check as event taps may run on different threads)
-        
-        totalEventsReceived += 1
-        if totalEventsReceived % 100 == 0 {
-            logger.debug("Event stats: total=\(self.totalEventsReceived), fn=\(self.fnEventsReceived), scaled=\(self.scalingEventsApplied)")
-        }
-        
-        self.eventCount += 1
-        logger.info("Processing event #\(self.eventCount): \(self.debugEventType(type))")
-        
         switch type {
         case .flagsChanged:
-            print("PointerScaler: Received flagsChanged event")
-            logger.debug("flagsChanged received – flags=\(event.flags.rawValue, privacy: .public)")
-            fnEventsReceived += 1
             handleFlagsChanged(event: event)
-            
-        case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
-            self.totalEventsReceived += 1
-            logger.notice("🖱️ MOUSE EVENT #\(self.totalEventsReceived): \(self.debugEventType(type))")
-            print("PointerScaler: 🖱️ MOUSE EVENT #\(self.totalEventsReceived): \(self.debugEventType(type))")
-            
-            self.updateFnKeyState()
-            logger.notice("🔑 FN KEY STATE: \(self.fnKeyPressed ? "PRESSED ✅" : "NOT PRESSED ❌")")
-            print("PointerScaler: 🔑 FN KEY STATE: \(self.fnKeyPressed ? "PRESSED ✅" : "NOT PRESSED ❌")")
-            
-            if self.fnKeyPressed {
-                logger.notice("🎯 ATTEMPTING TO SCALE MOUSE MOVEMENT...")
-                print("PointerScaler: 🎯 ATTEMPTING TO SCALE MOUSE MOVEMENT...")
-                let wasScaled = self.scaleMouseMovement(event: event)
-                if wasScaled {
-                    self.scaledEventCount += 1
-                    self.scalingEventsApplied += 1
-                    logger.notice("✅ SCALING APPLIED! Total scaled: \(self.scalingEventsApplied)")
-                    print("PointerScaler: ✅ SCALING APPLIED! Total scaled: \(self.scalingEventsApplied)")
-                } else {
-                    logger.error("❌ SCALING FAILED!")
-                    print("PointerScaler: ❌ SCALING FAILED!")
-                }
-            } else {
-                logger.notice("⭕ FN KEY NOT PRESSED - NO SCALING")
-                print("PointerScaler: ⭕ FN KEY NOT PRESSED - NO SCALING")
-            }
-            
-        case .scrollWheel:
-            print("PointerScaler: Received scroll wheel event")
-            updateFnKeyState()
-            if fnKeyPressed {
-                let wasScaled = scaleScrollWheel(event: event)
-                if wasScaled {
-                    self.scaledEventCount += 1
-                    scalingEventsApplied += 1
-                    logger.info("Applied scroll scaling with fn key pressed (total scaled: \(self.scaledEventCount))")
-                }
-            }
             
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
             logger.warning("Event tap disabled by \(type == .tapDisabledByTimeout ? "timeout" : "user input"), attempting to re-enable")
             if let tap = eventTap {
                 CGEvent.tapEnable(tap: tap, enable: true)
             }
-            return nil  // Return nil for these events
             
         default:
-            logger.debug("Received other event type: \(type.rawValue)")
+            // Ignore all other events - we only care about fn key detection
             break
         }
         
+        // Always pass events through unmodified - we don't modify any events
         return Unmanaged.passUnretained(event)
     }
     
@@ -256,176 +209,68 @@ public class PointerScaler {
     }
     
     private func handleFlagsChanged(event: CGEvent) {
-        // Check keycode directly (FN key is keycode 63/0x3F)
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         let flags = event.flags
         
-        logger.debug("FlagsChanged event: keyCode=\(keyCode), flags=\(flags.rawValue)")
-        logger.debug("Flags breakdown: cmd=\(flags.contains(.maskCommand)), opt=\(flags.contains(.maskAlternate)), ctrl=\(flags.contains(.maskControl)), shift=\(flags.contains(.maskShift)), fn=\(flags.contains(.maskSecondaryFn))")
+        logger.info("🔍 FlagsChanged event: keyCode=\(keyCode), flags=\(flags.rawValue)")
+        logger.info("🔍 Current fn state: internal=\(self.fnKeyPressed), flag=\(flags.contains(.maskSecondaryFn))")
         
-        if keyCode == 63 {
-            // Fixed: Use actual flag state instead of toggle
-            let wasFnPressed = fnKeyPressed
-            fnKeyPressed = flags.contains(.maskSecondaryFn)
-            
-            if wasFnPressed != fnKeyPressed {
-                logger.notice("FN key state changed via keycode 63: \(self.fnKeyPressed ? "PRESSED" : "RELEASED")")
-                onPrecisionModeChange?(fnKeyPressed)
-                
-                // Reset accumulation when switching modes
-                accumulatedX = 0.0
-                accumulatedY = 0.0
-                logger.debug("Cleared fractional accumulation on fn key state change (flags)")
-            }
-            return
-        }
-        
-        // Fallback: Check flag state directly without polling to avoid race conditions
+        // Always use the flag state, regardless of keycode
         let wasFnPressed = fnKeyPressed
         fnKeyPressed = flags.contains(.maskSecondaryFn)
         
+        // Only handle state changes
         if wasFnPressed != fnKeyPressed {
-            logger.notice("Fn key state changed via flags: \(self.fnKeyPressed ? "PRESSED" : "RELEASED")")
-            onPrecisionModeChange?(fnKeyPressed)
-            
-            // Reset accumulation when switching modes
-            accumulatedX = 0.0
-            accumulatedY = 0.0
-            logger.debug("Cleared fractional accumulation on fn key state change (flags fallback)")
-        }
-    }
-    
-    private func updateFnKeyState() {
-        let keyState = CGEventSource.keyState(.combinedSessionState, key: Self.fnKeyCode)
-        let wasFnPressed = fnKeyPressed
-        
-        fnKeyPressed = keyState
-        
-        if wasFnPressed != fnKeyPressed {
-            logger.notice("Fn key state updated via polling: \(self.fnKeyPressed ? "PRESSED" : "RELEASED")")
-            onPrecisionModeChange?(fnKeyPressed)
-            
-            // Reset accumulation when switching modes to prevent jumps
-            accumulatedX = 0.0
-            accumulatedY = 0.0
-            logger.debug("Cleared fractional accumulation on fn key state change")
-        }
-    }
-    
-    private func scaleMouseMovement(event: CGEvent) -> Bool {
-        logger.notice("🔄 ENTERING scaleMouseMovement function")
-        print("PointerScaler: 🔄 ENTERING scaleMouseMovement function")
-        
-        // TEST ALL FIELD ACCESS METHODS (from TODO.md)
-        let deltaX_int = event.getIntegerValueField(.mouseEventDeltaX)
-        let deltaY_int = event.getIntegerValueField(.mouseEventDeltaY)
-        let deltaX_double = event.getDoubleValueField(.mouseEventDeltaX)
-        let deltaY_double = event.getDoubleValueField(.mouseEventDeltaY)
-        
-        logger.notice("📊 FIELD COMPARISON:")
-        logger.notice("   Integer: X=\(deltaX_int), Y=\(deltaY_int)")
-        logger.notice("   Double:  X=\(deltaX_double), Y=\(deltaY_double)")
-        print("PointerScaler: 📊 FIELD COMPARISON: Integer(\(deltaX_int),\(deltaY_int)) Double(\(deltaX_double),\(deltaY_double))")
-        
-        guard deltaX_int != 0 || deltaY_int != 0 else {
-            logger.notice("⭕ NO MOVEMENT - SKIPPING")
-            print("PointerScaler: ⭕ NO MOVEMENT - SKIPPING")
-            return false
-        }
-        
-        // EXTREME SCALING FACTOR (from TODO.md) - Make effect super obvious
-        let extremeFactor = 20.0  // 20x slower instead of user factor!
-        
-        // Try DOUBLE FIELDS approach
-        let scaledMovementX_double = deltaX_double / extremeFactor
-        let scaledMovementY_double = deltaY_double / extremeFactor
-        
-        logger.notice("🚨 EXTREME SCALING TEST (20x slower):")
-        logger.notice("   Original doubles: (\(deltaX_double),\(deltaY_double))")
-        logger.notice("   Scaled doubles: (\(scaledMovementX_double),\(scaledMovementY_double))")
-        
-        // FIRST: Try setting DOUBLE fields directly
-        event.setDoubleValueField(.mouseEventDeltaX, value: scaledMovementX_double)
-        event.setDoubleValueField(.mouseEventDeltaY, value: scaledMovementY_double)
-        
-        // Verify double field setting
-        let verifyX_double = event.getDoubleValueField(.mouseEventDeltaX)
-        let verifyY_double = event.getDoubleValueField(.mouseEventDeltaY)
-        
-        logger.notice("🔍 DOUBLE FIELD TEST:")
-        logger.notice("   Set: (\(scaledMovementX_double),\(scaledMovementY_double))")
-        logger.notice("   Got: (\(verifyX_double),\(verifyY_double))")
-        
-        let doubleSuccess = abs(verifyX_double - scaledMovementX_double) < 0.001 && abs(verifyY_double - scaledMovementY_double) < 0.001
-        
-        if doubleSuccess {
-            logger.notice("✅ DOUBLE FIELDS WORKED!")
-            print("PointerScaler: ✅ DOUBLE FIELDS WORKED! Set(\(scaledMovementX_double),\(scaledMovementY_double)) Got(\(verifyX_double),\(verifyY_double))")
+            logger.notice("🎯 FN key state changed: \(self.fnKeyPressed ? "PRESSED" : "RELEASED")")
+            print("PointerScaler: 🎯 FN key state changed: \(self.fnKeyPressed ? "PRESSED" : "RELEASED")")
+            handleFnKeyStateChange(isPressed: fnKeyPressed)
         } else {
-            logger.warning("❌ DOUBLE FIELDS FAILED - trying integer fallback")
-            print("PointerScaler: ❌ DOUBLE FIELDS FAILED")
-            
-            // FALLBACK: Try integer fields with extreme scaling
-            let scaledX_int = Int64(deltaX_double / extremeFactor)
-            let scaledY_int = Int64(deltaY_double / extremeFactor)
-            
-            logger.notice("🔄 INTEGER FALLBACK:")
-            logger.notice("   Scaled integers: (\(scaledX_int),\(scaledY_int))")
-            
-            event.setIntegerValueField(.mouseEventDeltaX, value: scaledX_int)
-            event.setIntegerValueField(.mouseEventDeltaY, value: scaledY_int)
-            
-            let verifyX_int = event.getIntegerValueField(.mouseEventDeltaX)
-            let verifyY_int = event.getIntegerValueField(.mouseEventDeltaY)
-            
-            logger.notice("   Set: (\(scaledX_int),\(scaledY_int))")
-            logger.notice("   Got: (\(verifyX_int),\(verifyY_int))")
-            
-            let intSuccess = verifyX_int == scaledX_int && verifyY_int == scaledY_int
-            logger.notice("🎯 INTEGER SCALING \(intSuccess ? "SUCCESS" : "FAILED")")
-            print("PointerScaler: 🎯 INTEGER SCALING \(intSuccess ? "SUCCESS" : "FAILED")")
-            
-            return intSuccess
+            logger.debug("FN key state unchanged: \(self.fnKeyPressed ? "PRESSED" : "RELEASED")")
         }
-        
-        // Reset instant mouser to prevent WindowServer corrections
-        event.setIntegerValueField(.mouseEventInstantMouser, value: 0)
-        
-        logger.notice("🎯 EXTREME SCALING COMPLETE - 20x SLOWER!")
-        print("PointerScaler: 🎯 EXTREME SCALING COMPLETE - 20x SLOWER!")
-        
-        return doubleSuccess
     }
     
-    private func scaleScrollWheel(event: CGEvent) -> Bool {
-        // Try integer fields first for scroll wheel deltas
-        let deltaAxis1 = event.getIntegerValueField(.scrollWheelEventDeltaAxis1)
-        let deltaAxis2 = event.getIntegerValueField(.scrollWheelEventDeltaAxis2)
+    private func handleFnKeyStateChange(isPressed: Bool) {
+        logger.info("🎯 handleFnKeyStateChange called: isPressed=\(isPressed), currentPrecisionMode=\(self.isInPrecisionMode)")
+        print("PointerScaler: 🎯 handleFnKeyStateChange: isPressed=\(isPressed), precision=\(self.isInPrecisionMode)")
         
-        // Only scale if there's actual scroll movement (non-zero deltas)
-        guard deltaAxis1 != 0 || deltaAxis2 != 0 else {
-            return false
+        guard isPressed != isInPrecisionMode else { 
+            logger.debug("No state change needed: isPressed=\(isPressed), isInPrecisionMode=\(self.isInPrecisionMode)")
+            return 
         }
         
-        let scaledDelta1 = Int64(Double(deltaAxis1) / precisionFactor)
-        let scaledDelta2 = Int64(Double(deltaAxis2) / precisionFactor)
-        
-        logger.debug("Scaling scroll: (\(deltaAxis1), \(deltaAxis2)) -> (\(scaledDelta1), \(scaledDelta2)) with factor \(self.precisionFactor)")
-        
-        event.setIntegerValueField(.scrollWheelEventDeltaAxis1, value: scaledDelta1)
-        event.setIntegerValueField(.scrollWheelEventDeltaAxis2, value: scaledDelta2)
-        
-        // Verify scroll scaling
-        let verifyDelta1 = event.getIntegerValueField(.scrollWheelEventDeltaAxis1)
-        let verifyDelta2 = event.getIntegerValueField(.scrollWheelEventDeltaAxis2)
-        let scrollScalingWorked = verifyDelta1 == scaledDelta1 && verifyDelta2 == scaledDelta2
-        
-        if !scrollScalingWorked {
-            logger.error("CRITICAL: Scroll scaling failed! Expected (\(scaledDelta1), \(scaledDelta2)), got (\(verifyDelta1), \(verifyDelta2))")
+        do {
+            if isPressed && !isInPrecisionMode {
+                logger.notice("🚀 ACTIVATING precision mode with factor \(self.precisionFactor)")
+                print("PointerScaler: 🚀 ACTIVATING precision mode")
+                print("PointerScaler: 🔧 About to call systemSpeedController.setSlowSpeed(factor: \(precisionFactor))")
+                try systemSpeedController.setSlowSpeed(factor: precisionFactor)
+                print("PointerScaler: ✅ systemSpeedController.setSlowSpeed() completed successfully")
+                isInPrecisionMode = true
+                logger.info("✅ Precision mode activated - system speed slowed by \(self.precisionFactor)x")
+            } else if !isPressed && isInPrecisionMode {
+                logger.notice("🛑 DEACTIVATING precision mode")
+                print("PointerScaler: 🛑 DEACTIVATING precision mode")
+                print("PointerScaler: 🔧 About to call systemSpeedController.restoreOriginalSpeed()")
+                try systemSpeedController.restoreOriginalSpeed()
+                print("PointerScaler: ✅ systemSpeedController.restoreOriginalSpeed() completed successfully")
+                isInPrecisionMode = false
+                logger.info("✅ Precision mode deactivated - system speed restored")
+            }
+            
+            // Always call the callback to update UI
+            DispatchQueue.main.async {
+                self.onPrecisionModeChange?(isPressed)
+            }
+        } catch {
+            logger.error("❌ Failed to change system speed: \(error)")
+            print("PointerScaler: ❌ Failed to change system speed: \(error)")
+            // Still call the callback to update UI with error state
+            DispatchQueue.main.async {
+                self.onPrecisionModeChange?(isPressed)
+            }
         }
-        
-        return scrollScalingWorked
     }
+    
     
     private func startDebugTimer() {
         debugTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
@@ -435,12 +280,17 @@ public class PointerScaler {
     
     private func debugCurrentState() {
         let keyState = CGEventSource.keyState(.combinedSessionState, key: Self.fnKeyCode)
-        logger.notice("Debug: fn key polling=\(keyState ? "PRESSED" : "RELEASED"), internal=\(self.fnKeyPressed ? "PRESSED" : "RELEASED"), factor=\(self.precisionFactor)")
-        logger.notice("Event stats: total=\(self.eventCount), scaled=\(self.scaledEventCount)")
+        logger.notice("Debug: fn key polling=\(keyState ? "PRESSED" : "RELEASED"), internal=\(self.fnKeyPressed ? "PRESSED" : "RELEASED"), precision mode=\(self.isInPrecisionMode ? "ACTIVE" : "INACTIVE"), factor=\(self.precisionFactor)")
         
         // Check secure input mode periodically
         if IsSecureEventInputEnabled() {
             logger.warning("Secure input mode is active")
+        }
+        
+        // Validate speed change if in precision mode
+        if isInPrecisionMode {
+            let isValid = systemSpeedController.validateSpeedChange(expectedFactor: precisionFactor)
+            logger.notice("System speed validation: \(isValid ? "VALID" : "INVALID")")
         }
     }
 }

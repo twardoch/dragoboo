@@ -27,7 +27,12 @@ let package = Package(
         ),
         .target(
             name: "DragobooCore",
-            dependencies: []
+            dependencies: [],
+            linkerSettings: [
+                .linkedFramework("IOKit"),
+                .linkedFramework("ApplicationServices"),
+                .linkedFramework("CoreGraphics")
+            ]
         ),
         .testTarget(
             name: "DragobooCoreTests",
