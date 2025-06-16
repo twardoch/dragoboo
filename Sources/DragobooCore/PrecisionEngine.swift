@@ -46,6 +46,9 @@ public class PrecisionEngine {
     // v2.0: Configurable modifier keys
     private var modifierKeys: Set<ModifierKey> = [.fn]
     
+    // v2.0: Drag acceleration modifier keys
+    private var dragAccelerationModifierKeys: Set<ModifierKey> = []
+    
     // v2.0: Feature toggles
     private var slowSpeedEnabled: Bool = true
     private var dragAccelerationEnabled: Bool = true
@@ -55,6 +58,10 @@ public class PrecisionEngine {
     private var accelerationRadius: Double = 200.0
     private var isDragging = false
     private var currentDragDistance: Double = 0.0
+    
+    // v2.0: Modifier state tracking
+    private var isSlowSpeedModifiersActive = false
+    private var isDragAccelerationModifiersActive = false
     
     public var onPrecisionModeChange: ((Bool) -> Void)?
     
@@ -171,6 +178,12 @@ public class PrecisionEngine {
         logger.info("Updated modifier keys: \(keys)")
     }
     
+    // v2.0: Update drag acceleration modifier keys
+    public func updateDragAccelerationModifierKeys(_ keys: Set<ModifierKey>) {
+        dragAccelerationModifierKeys = keys
+        logger.info("Updated drag acceleration modifier keys: \(keys)")
+    }
+    
     // v2.0: Update drag acceleration radius
     public func updateAccelerationRadius(_ radius: Double) {
         accelerationRadius = radius
@@ -272,8 +285,8 @@ public class PrecisionEngine {
         accumulatedX -= Double(scaledX)
         accumulatedY -= Double(scaledY)
         
-        // For precision mode OR drag acceleration, use appropriate handling
-        if (isInPrecisionMode && slowSpeedEnabled) || (isDragEvent && isDragging && dragAccelerationEnabled) {
+        // For precision mode OR drag acceleration with proper modifier state, use appropriate handling
+        if (isInPrecisionMode && slowSpeedEnabled) || (isDragEvent && isDragging && dragAccelerationEnabled && isDragAccelerationModifiersActive) {
             // Use manual cursor warping for precise control
             let newPosition = CGPoint(
                 x: lastCursorPosition.x + Double(scaledX),
@@ -322,13 +335,39 @@ public class PrecisionEngine {
     private func handleFlagsChanged(event: CGEvent) {
         let flags = event.flags
         
-        // v2.0: Check if any configured modifier keys are pressed (only if slow speed is enabled and modifier keys are configured)
-        let wasActive = fnKeyPressed
-        fnKeyPressed = slowSpeedEnabled && !modifierKeys.isEmpty && modifierKeys.contains { key in
+        // v2.0: Check slow speed modifier state
+        isSlowSpeedModifiersActive = slowSpeedEnabled && !modifierKeys.isEmpty && modifierKeys.allSatisfy { key in
             flags.contains(key.cgEventFlag)
         }
         
-        // Only handle state changes
+        // v2.0: Check drag acceleration modifier state
+        if dragAccelerationModifierKeys.isEmpty {
+            // No modifiers configured = always active when drag acceleration enabled
+            isDragAccelerationModifiersActive = dragAccelerationEnabled
+        } else {
+            // Modifiers configured = only active when ALL those modifiers are pressed
+            isDragAccelerationModifiersActive = dragAccelerationEnabled && dragAccelerationModifierKeys.allSatisfy { key in
+                flags.contains(key.cgEventFlag)
+            }
+        }
+        
+        // Apply precedence: slow speed wins over drag acceleration for overlapping modifiers
+        if isSlowSpeedModifiersActive && isDragAccelerationModifiersActive {
+            // Check if there's overlap in active modifiers
+            let activeSlowSpeedModifiers = modifierKeys.filter { key in flags.contains(key.cgEventFlag) }
+            let activeDragAccelerationModifiers = dragAccelerationModifierKeys.filter { key in flags.contains(key.cgEventFlag) }
+            
+            if !Set(activeSlowSpeedModifiers).isDisjoint(with: Set(activeDragAccelerationModifiers)) {
+                // There's overlap, slow speed takes precedence
+                isDragAccelerationModifiersActive = false
+            }
+        }
+        
+        // Handle slow speed mode changes (renamed from fnKeyPressed for clarity)
+        let wasActive = fnKeyPressed
+        fnKeyPressed = isSlowSpeedModifiersActive
+        
+        // Only handle state changes for slow speed
         if wasActive != fnKeyPressed {
             handleActivationStateChange(isPressed: fnKeyPressed)
         }
@@ -383,8 +422,13 @@ public class PrecisionEngine {
         // The system's baseline "normal" speed is factor 2.0
         let normalSpeedFactor = 2.0
         
-        // If dragging with drag acceleration enabled, it overrides slow speed
-        if isDragging && self.isDragging && dragAccelerationEnabled {
+        // Precedence: slow speed takes priority over drag acceleration
+        if isInPrecisionMode && slowSpeedEnabled {
+            return precisionFactor
+        }
+        
+        // If dragging with drag acceleration enabled and modifiers allow it
+        if isDragging && self.isDragging && dragAccelerationEnabled && isDragAccelerationModifiersActive {
             // Calculate progress from drag start to radius
             let progress = min(currentDragDistance / accelerationRadius, 1.0)
             
@@ -398,12 +442,7 @@ public class PrecisionEngine {
             return startFactor * (1.0 - easedProgress) + normalSpeedFactor * easedProgress
         }
         
-        // Otherwise, use slow speed if active
-        if isInPrecisionMode && slowSpeedEnabled {
-            return precisionFactor
-        }
-        
-        // Normal speed when no modifiers
+        // Normal speed when no special modes are active
         return normalSpeedFactor
     }
     

@@ -62,11 +62,16 @@ struct SlowSpeedToggleView: View {
                     set: { _ in appState.toggleSlowSpeed() }
                 ))
                 .toggleStyle(.checkbox)
+                .help("Enable to slow down cursor movement when holding modifier keys")
                 
                 Spacer()
                 
                 if appState.slowSpeedEnabled {
-                    ModifierKeyButtons()
+                    ModifierKeyButtons(
+                        modifierKeys: appState.modifierKeys,
+                        toggleAction: appState.toggleModifierKey,
+                        isFeatureActive: appState.isPrecisionModeActive
+                    )
                 }
             }
             
@@ -75,16 +80,11 @@ struct SlowSpeedToggleView: View {
                 Slider(value: $slowSpeedPercentage, in: 1...100, step: 5) { _ in
                     appState.updateSlowSpeedPercentage(slowSpeedPercentage)
                 }
+                .help("100% = normal speed, lower = slower cursor movement")
                 
                 Text("\(Int(slowSpeedPercentage))%")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                
-                if appState.slowSpeedEnabled && appState.modifierKeys.isEmpty {
-                    Text("Select modifier keys to activate")
-                        .font(.caption2)
-                        .foregroundColor(.orange)
-                }
             }
             .onAppear {
                 slowSpeedPercentage = appState.slowSpeedPercentage
@@ -95,38 +95,50 @@ struct SlowSpeedToggleView: View {
 
 struct ModifierKeyButtons: View {
     @EnvironmentObject var appState: AppState
+    let modifierKeys: Set<ModifierKey>
+    let toggleAction: (ModifierKey) -> Void
+    let isFeatureActive: Bool
+    
+    init(modifierKeys: Set<ModifierKey>, toggleAction: @escaping (ModifierKey) -> Void, isFeatureActive: Bool = false) {
+        self.modifierKeys = modifierKeys
+        self.toggleAction = toggleAction
+        self.isFeatureActive = isFeatureActive
+    }
     
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 8) {
             ForEach(ModifierKey.allCases, id: \.self) { key in
-                Button(key.displayName) {
-                    appState.toggleModifierKey(key)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.mini)
-                .background(buttonBackground(for: key))
-                .foregroundColor(buttonForeground(for: key))
-                .cornerRadius(3)
+                Text(key.displayName)
+                    .font(.system(.body, design: .default))
+                    .foregroundColor(textColor(for: key))
+                    .onTapGesture {
+                        toggleAction(key)
+                    }
+                    .help("Click to toggle \(helpText(for: key))")
             }
         }
     }
     
-    private func buttonBackground(for key: ModifierKey) -> Color {
-        let isSelected = appState.modifierKeys.contains(key)
-        let isActive = appState.isPrecisionModeActive && isSelected
+    private func textColor(for key: ModifierKey) -> Color {
+        let isSelected = modifierKeys.contains(key)
+        let isActive = isFeatureActive && isSelected
         
         if isActive {
             return .green
         } else if isSelected {
-            return .accentColor
+            return .primary
         } else {
-            return .clear
+            return .secondary.opacity(0.5)
         }
     }
     
-    private func buttonForeground(for key: ModifierKey) -> Color {
-        let isSelected = appState.modifierKeys.contains(key)
-        return isSelected ? .white : .primary
+    private func helpText(for key: ModifierKey) -> String {
+        switch key {
+        case .fn: return "Function key"
+        case .control: return "Control key"
+        case .option: return "Option/Alt key"
+        case .command: return "Command key"
+        }
     }
 }
 
@@ -142,8 +154,17 @@ struct DragAccelerationToggleView: View {
                     set: { _ in appState.toggleDragAcceleration() }
                 ))
                 .toggleStyle(.checkbox)
+                .help("Enable to start slow and accelerate while dragging")
                 
                 Spacer()
+                
+                if appState.dragAccelerationEnabled {
+                    ModifierKeyButtons(
+                        modifierKeys: appState.dragAccelerationModifierKeys,
+                        toggleAction: appState.toggleDragAccelerationModifierKey,
+                        isFeatureActive: false  // TODO: Add drag acceleration active state if needed
+                    )
+                }
             }
             
             if appState.dragAccelerationEnabled {
@@ -151,13 +172,10 @@ struct DragAccelerationToggleView: View {
                     Slider(value: $accelerationRadius, in: 50...1000, step: 50) { _ in
                         appState.updateAccelerationRadius(accelerationRadius)
                     }
+                    .help("Distance over which cursor accelerates from slow to normal speed")
                     
                     Text("\(Int(accelerationRadius))px")
                         .font(.caption)
-                        .foregroundColor(.secondary)
-                    
-                    Text("Speed increases from slow to normal over this distance")
-                        .font(.caption2)
                         .foregroundColor(.secondary)
                 }
                 .onAppear {
@@ -173,9 +191,17 @@ struct BottomSection: View {
     
     var body: some View {
         HStack {
-            Text("Dragoboo v2.0.0")
-                .font(.caption)
-                .foregroundColor(.secondary)
+            Button(action: {
+                if let url = URL(string: "https://drago.boo") {
+                    NSWorkspace.shared.open(url)
+                }
+            }) {
+                Text("Dragoboo v2.0.0")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Visit Dragoboo website")
             
             Spacer()
             
@@ -183,6 +209,7 @@ struct BottomSection: View {
                 NSApplication.shared.terminate(nil)
             }
             .keyboardShortcut("q", modifiers: .command)
+            .help("Quit Dragoboo (⌘Q)")
         }
     }
 }

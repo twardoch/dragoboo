@@ -31,6 +31,9 @@ class AppState: ObservableObject {
     // v2.0: Configurable modifier keys
     @AppStorage("modifierKeysData") private var modifierKeysData: Data = Data()
     
+    // v2.0: Drag acceleration modifier keys
+    @AppStorage("dragAccelerationModifierKeysData") private var dragAccelerationModifierKeysData: Data = Data()
+    
     // v2.0: Drag acceleration settings
     @AppStorage("accelerationRadius") var accelerationRadius: Double = 200.0
     
@@ -47,6 +50,19 @@ class AppState: ObservableObject {
         set {
             modifierKeysData = (try? JSONEncoder().encode(newValue)) ?? Data()
             precisionEngine?.updateModifierKeys(newValue)
+        }
+    }
+    
+    var dragAccelerationModifierKeys: Set<ModifierKey> {
+        get {
+            guard let decoded = try? JSONDecoder().decode(Set<ModifierKey>.self, from: dragAccelerationModifierKeysData) else {
+                return [] // Default to no modifiers (always active when dragging)
+            }
+            return decoded
+        }
+        set {
+            dragAccelerationModifierKeysData = (try? JSONEncoder().encode(newValue)) ?? Data()
+            precisionEngine?.updateDragAccelerationModifierKeys(newValue)
         }
     }
     
@@ -95,6 +111,7 @@ class AppState: ObservableObject {
         
         // Configure settings
         precisionEngine?.updateModifierKeys(modifierKeys)
+        precisionEngine?.updateDragAccelerationModifierKeys(dragAccelerationModifierKeys)
         precisionEngine?.updateAccelerationRadius(accelerationRadius)
         precisionEngine?.updateSlowSpeedEnabled(slowSpeedEnabled)
         precisionEngine?.updateDragAccelerationEnabled(dragAccelerationEnabled)
@@ -115,6 +132,16 @@ class AppState: ObservableObject {
             keys.insert(key)
         }
         modifierKeys = keys
+    }
+    
+    func toggleDragAccelerationModifierKey(_ key: ModifierKey) {
+        var keys = dragAccelerationModifierKeys
+        if keys.contains(key) {
+            keys.remove(key)
+        } else {
+            keys.insert(key)
+        }
+        dragAccelerationModifierKeys = keys
     }
     
     func updateSlowSpeedPercentage(_ percentage: Double) {

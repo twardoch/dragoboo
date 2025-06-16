@@ -1,44 +1,142 @@
 # TODO.md
 
-## ✅ COMPLETED: UI Fixes v2.1
+## ✅ COMPLETED: v2.0 Features
 
-All requested UI issues have been resolved:
+### Slow Speed Mode ✅
+- Configurable modifier keys (`fn`, `⌃`, `⌥`, `⌘`)
+- Percentage-based control (100% = normal, below = slower)
+- Visual feedback (green button highlighting)
+- Can disable by deselecting all modifiers
 
-### ✅ Fixed Issues:
+### Drag Acceleration ✅
+- Works independently (no modifiers required by default)
+- Configurable modifier keys (optional activation)
+- Starts at slow speed slider value
+- Accelerates to normal over configurable radius
+- Smooth cubic easing curve
+- Precedence system: slow speed wins over drag acceleration for overlapping modifiers
 
-- **✅ Slider Range Corrected**: Changed from 0-200% to 1-100%, where 100% = normal speed and below 100% = slower
-- **✅ Slider Visibility**: Slider now always visible (affects drag acceleration's low-distance speed), modifier keys only show when slow speed is enabled
-- **✅ Drag Acceleration Alignment**: Label stays left-aligned when disabled by wrapping in HStack
-- **✅ Modifier Key Symbols**: Updated to use proper symbols: `fn`, `⌃`, `⌥`, `⌘`
-- **✅ Active Feedback**: Modifier key buttons now "light up" green when pressed, removed redundant status indicator
+### UI Improvements ✅
+- Compact 300px width
+- Toggle controls for features
+- Real-time slider feedback
+- Clean, intuitive layout
+- Removed "Select modifier keys to activate" warning text
+- Unified modifier key button component for both features
 
-### 🔧 Technical Changes:
+## 🔄 IMMEDIATE: Bug Fixes & Polish
 
-- **Precision Factor**: Updated calculation to `100.0 / slowSpeedPercentage` (100% = factor 1.0)
-- **Default Value**: Changed default from 50% to 100% for intuitive normal speed
-- **UI Logic**: Always show slider, conditionally show modifier keys
-- **Visual Feedback**: Added real-time button highlighting for active modifier keys
-- **Layout**: Fixed alignment issues with proper HStack wrapping
+### High Priority
+- [ ] Test multi-display configurations thoroughly
+- [ ] Add error handling for edge cases (display disconnection, etc.)
+- [ ] Improve coordinate system handling for external displays
+- [ ] Add logging for troubleshooting user issues
 
-## 🔄 NEXT: Testing & Refinement
+### Medium Priority
+- [ ] Add haptic feedback when activating/deactivating modes (if trackpad)
+- [ ] Optimize accumulator logic for very slow speeds (<10%)
+- [ ] Test with various input devices (Magic Mouse, third-party mice)
+- [ ] Profile memory usage during long sessions
 
-### Immediate Testing Tasks
+### Low Priority
+- [ ] Add tooltips to UI elements
+- [ ] Improve slider visual feedback
+- [ ] Add keyboard shortcuts for common actions
+- [ ] Create app icon variations for different states
 
-- [ ] Test percentage-based speed control across range (1%-100%)
-- [ ] Verify modifier key visual feedback works correctly
-- [ ] Test that slider affects drag acceleration when slow speed is disabled
-- [ ] Validate UI layout and alignment
-- [ ] Cross-test with different input devices (trackpad, mouse)
+## 🚀 NEXT: v2.1 Features
 
-### Phase 2: Advanced Features (Future)
+### Visual Feedback System
+- [ ] Optional floating indicator showing active mode
+- [ ] Drag acceleration progress visualization
+- [ ] Menu bar icon state changes
+- [ ] Accessibility announcements
 
-- [ ] Fine-tune drag acceleration curve for optimal UX
-- [ ] Performance optimization for complex modifier combinations
-- [ ] Enhanced visual feedback for drag acceleration state
+### Advanced Activation
+- [ ] Double-tap modifier for toggle mode
+- [ ] Long-press activation option
+- [ ] Custom modifier combinations (e.g., fn+opt)
+- [ ] Quick disable hotkey
 
-### Documentation Updates
+### Performance Monitor
+- [ ] Debug mode with performance stats
+- [ ] Event processing latency display
+- [ ] CPU/memory usage tracking
+- [ ] Frame rate monitoring
 
-- [ ] Update README.md with v2.1 features
-- [ ] Document new configuration behavior
-- [ ] Update usage instructions
-- [ ] Add troubleshooting for new features
+## 📋 FUTURE: v2.5+ Roadmap
+
+### Application Profiles
+- [ ] Detect active application
+- [ ] Per-app settings storage
+- [ ] Profile switching UI
+- [ ] Default profile management
+
+### Enhanced Customization
+- [ ] Custom acceleration curves editor
+- [ ] Import/export settings
+- [ ] Preset configurations
+- [ ] Advanced user preferences
+
+### Professional Features
+- [ ] Pressure sensitivity support
+- [ ] Directional speed biasing
+- [ ] Zone-based acceleration
+- [ ] Gesture triggers
+
+## 🏗️ INFRASTRUCTURE
+
+### Testing
+- [ ] Unit tests for PrecisionEngine
+- [ ] UI tests for ContentView
+- [ ] Integration tests for event handling
+- [ ] Performance benchmarks
+
+### Distribution
+- [ ] Create DMG installer
+- [ ] Homebrew formula
+- [ ] Auto-update mechanism
+- [ ] Crash reporting
+
+### Documentation
+- [ ] Video tutorials
+- [ ] User guide
+- [ ] API documentation
+- [ ] Contributing guide
+
+## 🐛 KNOWN ISSUES
+
+### To Investigate
+- [ ] Occasional coordinate drift with multiple displays
+- [ ] Potential memory leak after extended use (unconfirmed)
+- [ ] Modifier key state can get stuck if app loses focus
+- [ ] Drag acceleration may not reset properly on very fast movements
+
+### User Reports
+- [ ] Some users report lag with Bluetooth mice
+- [ ] Conflict with certain accessibility tools
+- [ ] Issues with macOS Sonoma 14.2+ (needs verification)
+
+## 📝 NOTES
+
+### Technical Debt
+- PrecisionEngine could use refactoring for clarity
+- Event handling logic is complex and needs documentation
+- Coordinate system conversions need centralization
+- Consider moving to async/await for future features
+
+### User Feedback
+- Users love the drag acceleration feature
+- Requests for more visual feedback
+- Some want per-application settings
+- Professional users need pressure sensitivity
+
+---
+
+**Priority Guide**:
+- 🔴 Critical (blocks usage)
+- 🟡 Important (affects experience)
+- 🟢 Nice to have (enhancement)
+- 🔵 Future consideration
+
+**Last Updated**: December 2024
