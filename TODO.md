@@ -27,10 +27,10 @@
 ## 🔄 IMMEDIATE: Bug Fixes & Polish
 
 ### High Priority
-- [ ] Test multi-display configurations thoroughly
-- [ ] Add error handling for edge cases (display disconnection, etc.)
-- [ ] Improve coordinate system handling for external displays
-- [ ] Add logging for troubleshooting user issues
+- [~] Reviewed multi-display coord handling, centralized conversion, added comments for testing (actual test pending env)
+- [x] Added error handling for critical operations (event tap, JSON, division by zero) and improved logging for errors.
+- [x] Centralized coordinate conversion (NSEvent to CGEvent global) in PrecisionEngine, added logging and comments for multi-display review.
+- [x] Significantly enhanced logging in PrecisionEngine and AppState for state changes, errors, and key logic paths.
 
 ### Medium Priority
 - [ ] Add haptic feedback when activating/deactivating modes (if trackpad)
@@ -87,13 +87,13 @@
 ## 🏗️ INFRASTRUCTURE
 
 ### Testing
-- [ ] Unit tests for PrecisionEngine
-- [ ] UI tests for ContentView
+- [x] Added comprehensive unit tests for PrecisionEngine's core logic (esp. calculateEffectivePrecisionFactor). (Execution pending env)
+- [ ] UI tests for ContentView (deferred due to env constraints)
 - [ ] Integration tests for event handling
 - [ ] Performance benchmarks
 
 ### Distribution
-- [ ] Create DMG installer
+- [~] Outlined process for DMG creation (implementation pending env)
 - [ ] Homebrew formula
 - [ ] Auto-update mechanism
 - [ ] Crash reporting
@@ -120,9 +120,9 @@
 ## 📝 NOTES
 
 ### Technical Debt
-- PrecisionEngine could use refactoring for clarity
-- Event handling logic is complex and needs documentation
-- Coordinate system conversions need centralization
+- [x] Refactored PrecisionEngine for clarity (renamed vars, inlined simple func).
+- [x] Added detailed comments to document complex event handling logic in PrecisionEngine.
+- [x] Centralized coordinate system conversion in PrecisionEngine.
 - Consider moving to async/await for future features
 
 ### User Feedback
