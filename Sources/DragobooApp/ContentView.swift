@@ -3,7 +3,7 @@ import DragobooCore
 
 struct ContentView: View {
     @EnvironmentObject var appState: AppState
-    @Environment(\.dismiss) private var dismiss
+    // @Environment(\.dismiss) private var dismiss // Removed as unused
     
     var body: some View {
         VStack(spacing: 16) {

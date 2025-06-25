@@ -164,7 +164,6 @@ dragoboo/
 ├── Scripts/
 │   ├── run.sh                    # Build & launch
 │   ├── stop.sh                   # Terminate instances
-│   └── recovery_trackpad.sh      # Legacy recovery
 └── Package.swift                 # Swift package config
 ```
 
