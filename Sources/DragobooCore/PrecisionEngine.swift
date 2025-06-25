@@ -32,61 +32,65 @@ public class PrecisionEngine {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var precisionFactor: Double
-    private var shouldActivateSlowSpeedMode = false // Tracks if the criteria for slow speed mode activation (e.g., specific modifier keys pressed) are met.
-    private var isInPrecisionMode = false // Tracks if the slow speed mode is currently active and scaling mouse movements.
+    // Tracks if the slow speed mode is currently active and scaling mouse movements.
+    // This is controlled by handleActivationStateChange.
+    private var isInPrecisionMode = false
     private let logger = Logger(subsystem: "com.dragoboo.core", category: "PrecisionEngine")
     
     // --- State Variables ---
 
-    // Movement Accumulators:
-    // These store fractional mouse movements that are too small to translate to a full pixel step
-    // at the current precision factor. They accumulate until a whole pixel step can be made,
-    // ensuring smooth and accurate scaling even at very high precision factors (very slow speeds).
+    // Movement Accumulators for fractional pixel movements
     private var accumulatedX: Double = 0.0
     private var accumulatedY: Double = 0.0
     
-    // Last Known Cursor Position:
-    // When using CGWarpMouseCursorPosition for manual cursor control (during slow speed or drag acceleration),
-    // this variable tracks the last known global (top-left origin) position of the cursor.
-    // New positions are calculated relative to this point. It's initialized when a mode requiring warping activates.
+    // Last Known Cursor Position for manual cursor warping
     private var lastCursorPosition: CGPoint = .zero
     
-    // Configurable Modifier Keys for Slow Speed Mode (Precision Mode):
-    // Set of modifier keys (fn, control, option, command) that, when ALL pressed, activate slow speed mode.
-    // Updated by `updateModifierKeys()`.
+    // Configurable modifier keys for Slow Speed Mode (Precision Mode)
     private var modifierKeys: Set<ModifierKey> = [.fn]
     
-    // v2.0: Drag acceleration modifier keys
+    // Configurable modifier keys for Drag Acceleration
     private var dragAccelerationModifierKeys: Set<ModifierKey> = []
     
-    // v2.0: Feature toggles
+    // Feature Toggles
     private var slowSpeedEnabled: Bool = true
     private var dragAccelerationEnabled: Bool = true
+    // Percentage for slow speed, used to derive startFactor for drag acceleration
     private var slowSpeedPercentage: Double = 100.0
     
-    // v2.0: Drag acceleration settings
+    // Drag Acceleration Settings
     private var accelerationRadius: Double = 200.0
-    private var isDragging = false
-    private var currentDragDistance: Double = 0.0
+    private var isDragging = false // Is a mouse button currently held down
+    private var currentDragDistance: Double = 0.0 // Distance dragged since mouse down
     
-    // v2.0: Modifier state tracking
+    // Modifier State Tracking (updated by handleFlagsChanged)
+    // True if conditions for slow speed activation (modifiers + feature toggle) are met
     private var isSlowSpeedModifiersActive = false
+    // True if conditions for drag acceleration activation (modifiers + feature toggle) are met
     private var isDragAccelerationModifiersActive = false
     
     public var onPrecisionModeChange: ((Bool) -> Void)?
     
-    private static let fnKeyCode: CGKeyCode = 0x3F
-    
     public init(precisionFactor: Double) {
         self.precisionFactor = precisionFactor
+        // Note: slowSpeedPercentage is also updated by updatePrecisionFactor
+        // It might be more direct if AppState provides both factor and percentage,
+        // or if PrecisionEngine always derives factor from a supplied percentage.
+        // For now, this reflects the existing logic structure.
+        if precisionFactor != 0 {
+            self.slowSpeedPercentage = 200.0 / precisionFactor
+        } else {
+            self.slowSpeedPercentage = 0 // Or handle error
+        }
     }
     
     public func start() throws {
         logger.info("Starting precision engine...")
         
         // Reset state on start
-        shouldActivateSlowSpeedMode = false
         isInPrecisionMode = false
+        isSlowSpeedModifiersActive = false // Also reset derived modifier states
+        isDragAccelerationModifiersActive = false
         
         // Check accessibility permissions first
         guard AXIsProcessTrusted() else {
@@ -488,25 +492,25 @@ public class PrecisionEngine {
                 """)
         }
 
-        // Handle precision mode activation/deactivation based on slow speed modifier state.
-        // `shouldActivateSlowSpeedMode` is true if slow speed modifiers are active, false otherwise.
-        let previouslyMetActivationCriteria = shouldActivateSlowSpeedMode
-        shouldActivateSlowSpeedMode = isSlowSpeedModifiersActive // This variable now accurately reflects if slow speed *should* be active based on keys.
-
-        // Only call `handleActivationStateChange` if the effective state of `shouldActivateSlowSpeedMode` has changed.
-        // `handleActivationStateChange` will then update `isInPrecisionMode` and manage related side effects.
-        if previouslyMetActivationCriteria != shouldActivateSlowSpeedMode {
-            logger.info("Slow speed activation criteria changed: \(previouslyMetActivationCriteria) -> \(shouldActivateSlowSpeedMode). Updating precision mode state.")
-            handleActivationStateChange(isPressed: shouldActivateSlowSpeedMode)
+        // Handle precision mode activation/deactivation based on the new state of isSlowSpeedModifiersActive.
+        // Call handleActivationStateChange if the current active state of precision mode (isInPrecisionMode)
+        // differs from what it should be based on the latest modifier key check (isSlowSpeedModifiersActive).
+        if isSlowSpeedModifiersActive != isInPrecisionMode {
+            logger.info("Slow speed activation criteria met (\(isSlowSpeedModifiersActive)) differs from current precision mode state (\(isInPrecisionMode)). Updating precision mode state.")
+            handleActivationStateChange(shouldBeActive: isSlowSpeedModifiersActive)
         }
     }
     
-    private func handleActivationStateChange(isPressed: Bool) {
-        guard isPressed != isInPrecisionMode else { 
+    private func handleActivationStateChange(shouldBeActive: Bool) {
+        // This function is called when isInPrecisionMode needs to change.
+        // The guard is technically redundant if called correctly from handleFlagsChanged,
+        // but kept as a safety check.
+        guard shouldBeActive != isInPrecisionMode else {
+            logger.warning("handleActivationStateChange called but shouldBeActive (\(shouldBeActive)) is already same as isInPrecisionMode (\(isInPrecisionMode)).")
             return 
         }
         
-        if isPressed && !isInPrecisionMode {
+        if shouldBeActive { // Equivalent to (shouldBeActive && !isInPrecisionMode) due to the guard
             // Reset accumulator when activating precision mode
             accumulatedX = 0.0
             accumulatedY = 0.0

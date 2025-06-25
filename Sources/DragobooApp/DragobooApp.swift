@@ -19,7 +19,7 @@ struct DragobooApp: App {
 class AppState: ObservableObject {
     @Published var isPrecisionModeActive = false
     @Published var isAccessibilityGranted = false
-    @Published var isDragging = false
+    // @Published var isDragging = false // Removed as unused
     
     // v2.0: Feature toggles
     @AppStorage("slowSpeedEnabled") var slowSpeedEnabled: Bool = true
@@ -37,18 +37,17 @@ class AppState: ObservableObject {
     // v2.0: Drag acceleration settings
     @AppStorage("accelerationRadius") var accelerationRadius: Double = 200.0
     
-    // Legacy support for existing precision factor
-    @AppStorage("precisionFactor") private var legacyPrecisionFactor: Double = 4.0
+    // Legacy @AppStorage("precisionFactor") private var legacyPrecisionFactor: Double = 4.0 // Removed
     
     var modifierKeys: Set<ModifierKey> {
         get {
             guard !modifierKeysData.isEmpty else {
-                logger.debug("modifierKeysData is empty, returning default: [.fn]")
+                // logger.debug("modifierKeysData is empty, returning default: [.fn]") // Kept for debugging if needed
                 return [.fn] // Default to fn key
             }
             do {
                 let decoded = try JSONDecoder().decode(Set<ModifierKey>.self, from: modifierKeysData)
-                logger.debug("Successfully decoded modifierKeys: \(decoded.map(\.displayName))")
+                // logger.debug("Successfully decoded modifierKeys: \(decoded.map(\.displayName))")
                 return decoded
             } catch {
                 logger.error("Failed to decode modifierKeysData: \(error.localizedDescription). Data: '\(String(data: modifierKeysData, encoding: .utf8) ?? "non-utf8 data")'. Returning default: [.fn]")
@@ -58,12 +57,10 @@ class AppState: ObservableObject {
         set {
             do {
                 modifierKeysData = try JSONEncoder().encode(newValue)
-                logger.debug("Successfully encoded and stored modifierKeys: \(newValue.map(\.displayName))")
+                // logger.debug("Successfully encoded and stored modifierKeys: \(newValue.map(\.displayName))")
             } catch {
                 logger.error("Failed to encode modifierKeys: \(error.localizedDescription). Value: \(newValue.map(\.displayName))")
-                // modifierKeysData will retain its old value if encoding fails.
             }
-            // Update the engine regardless of AppStorage success for the current session's behavior.
             precisionEngine?.updateModifierKeys(newValue)
         }
     }
@@ -71,12 +68,12 @@ class AppState: ObservableObject {
     var dragAccelerationModifierKeys: Set<ModifierKey> {
         get {
             guard !dragAccelerationModifierKeysData.isEmpty else {
-                logger.debug("dragAccelerationModifierKeysData is empty, returning default: []")
+                // logger.debug("dragAccelerationModifierKeysData is empty, returning default: []")
                 return [] // Default to no modifiers
             }
             do {
                 let decoded = try JSONDecoder().decode(Set<ModifierKey>.self, from: dragAccelerationModifierKeysData)
-                logger.debug("Successfully decoded dragAccelerationModifierKeys: \(decoded.map(\.displayName))")
+                // logger.debug("Successfully decoded dragAccelerationModifierKeys: \(decoded.map(\.displayName))")
                 return decoded
             } catch {
                 logger.error("Failed to decode dragAccelerationModifierKeysData: \(error.localizedDescription). Data: '\(String(data: dragAccelerationModifierKeysData, encoding: .utf8) ?? "non-utf8 data")'. Returning default: []")
@@ -86,7 +83,7 @@ class AppState: ObservableObject {
         set {
             do {
                 dragAccelerationModifierKeysData = try JSONEncoder().encode(newValue)
-                logger.debug("Successfully encoded and stored dragAccelerationModifierKeys: \(newValue.map(\.displayName))")
+                // logger.debug("Successfully encoded and stored dragAccelerationModifierKeys: \(newValue.map(\.displayName))")
             } catch {
                 logger.error("Failed to encode dragAccelerationModifierKeys: \(error.localizedDescription). Value: \(newValue.map(\.displayName))")
             }
@@ -94,9 +91,16 @@ class AppState: ObservableObject {
         }
     }
     
-    // Fixed: 100% = normal speed (factor 2.0 baseline), below 100% = slower
+    // Computed property for precisionFactor, derived from slowSpeedPercentage.
+    // This is the value passed to the PrecisionEngine for slow speed mode.
     var precisionFactor: Double {
-        // The system's "normal" speed is factor 2.0, not 1.0
+        // The system's "normal" speed is factor 2.0.
+        // A slowSpeedPercentage of 100% means normal speed (factor 2.0).
+        // A slowSpeedPercentage of 50% means half speed (factor 4.0).
+        guard slowSpeedPercentage > 0 else {
+            logger.warning("slowSpeedPercentage is \(slowSpeedPercentage), which is invalid. Defaulting to normal speed factor 2.0.")
+            return 2.0 // Avoid division by zero and return a safe default.
+        }
         return 200.0 / slowSpeedPercentage
     }
     
@@ -104,33 +108,17 @@ class AppState: ObservableObject {
     private let logger = Logger(subsystem: "com.dragoboo.app", category: "AppState")
     
     init() {
-        // Log initial @AppStorage values for easier debugging of persistence issues.
+        // Log initial @AppStorage values.
         logger.info("""
             AppState initializing. Current @AppStorage values:
             slowSpeedEnabled: \(slowSpeedEnabled), dragAccelerationEnabled: \(dragAccelerationEnabled),
             slowSpeedPercentage: \(slowSpeedPercentage), accelerationRadius: \(accelerationRadius),
-            modifierKeysData: \(modifierKeysData.count) bytes, dragAccelerationModifierKeysData: \(dragAccelerationModifierKeysData.count) bytes,
-            legacyPrecisionFactor (used for initial calculation if percentage is 100): \(legacyPrecisionFactor)
+            modifierKeysData: \(modifierKeysData.count) bytes, dragAccelerationModifierKeysData: \(dragAccelerationModifierKeysData.count) bytes
             """)
+            // Removed legacyPrecisionFactor from log
 
-        // The original code "Force reset to 100% (normal speed) to fix any legacy values"
-        // might be too aggressive if users have already configured a percentage.
-        // Let's check if it's the default AppStorage value (100.0) AND legacyPrecisionFactor suggests a different speed.
-        // However, `precisionFactor` var already correctly computes based on `slowSpeedPercentage`.
-        // The line `slowSpeedPercentage = 100.0` might have been to ensure a clean state from older app versions.
-        // For now, respecting its original intent but logging it.
-        if slowSpeedPercentage != 100.0 {
-            logger.info("Initial slowSpeedPercentage is \(slowSpeedPercentage), not 100.0. User setting preserved.")
-        } else {
-            // This was the original line:
-            // slowSpeedPercentage = 100.0
-            // It's redundant if the @AppStorage default is 100.0, but harmless.
-            // logger.info("Initial slowSpeedPercentage was 100.0 (default or reset).")
-        }
-        // The main purpose of `legacyPrecisionFactor` seems to be implicitly handled by `precisionFactor` getter,
-        // which uses `slowSpeedPercentage`. If `slowSpeedPercentage` was never changed from 100.0,
-        // then `precisionFactor` would be 2.0. A direct migration path for `legacyPrecisionFactor` isn't explicit.
-        // Given the "v2.0" status, it's assumed settings have stabilized around percentage.
+        // Comments about legacyPrecisionFactor and forced reset of slowSpeedPercentage removed as they are no longer relevant.
+        // slowSpeedPercentage will initialize from @AppStorage or its default (100.0).
 
         checkPermissions() // Sets initial isAccessibilityGranted
         if isAccessibilityGranted {
@@ -239,10 +227,10 @@ class AppState: ObservableObject {
         precisionEngine?.updateAccelerationRadius(radius)
     }
     
-    func updatePrecisionFactor(_ factor: Double) {
-        slowSpeedPercentage = 100.0 / factor
-        precisionEngine?.updatePrecisionFactor(factor)
-    }
+    // func updatePrecisionFactor(_ factor: Double) { // Removed as unused
+    //     slowSpeedPercentage = 100.0 / factor
+    //     precisionEngine?.updatePrecisionFactor(factor)
+    // }
     
     func toggleSlowSpeed() {
         slowSpeedEnabled.toggle()
