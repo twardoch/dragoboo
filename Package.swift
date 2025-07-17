@@ -38,5 +38,9 @@ let package = Package(
             name: "DragobooCoreTests",
             dependencies: ["DragobooCore"]
         ),
+        .testTarget(
+            name: "DragobooAppTests",
+            dependencies: ["DragobooApp", "DragobooCore"]
+        ),
     ]
 )
