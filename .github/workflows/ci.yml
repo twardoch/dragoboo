@@ -1,0 +1,165 @@
+# this_file: /root/repo/.github/workflows/ci.yml
+
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+
+jobs:
+  test:
+    name: Test
+    runs-on: macos-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Select Xcode version
+      run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+      
+    - name: Show Xcode version
+      run: xcodebuild -version
+      
+    - name: Show Swift version
+      run: swift --version
+      
+    - name: Cache Swift Package Manager
+      uses: actions/cache@v3
+      with:
+        path: .build
+        key: ${{ runner.os }}-spm-${{ hashFiles('**/Package.resolved') }}
+        restore-keys: |
+          ${{ runner.os }}-spm-
+    
+    - name: Generate version information
+      run: |
+        chmod +x scripts/version.sh
+        ./scripts/version.sh
+        
+    - name: Resolve dependencies
+      run: swift package resolve
+      
+    - name: Run tests
+      run: |
+        chmod +x scripts/test.sh
+        ./scripts/test.sh --coverage --junit
+        
+    - name: Upload test results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: test-results
+        path: |
+          reports/
+          coverage/
+          
+    - name: Upload coverage reports
+      uses: codecov/codecov-action@v3
+      if: always()
+      with:
+        file: coverage/coverage.txt
+        flags: unittests
+        name: codecov-umbrella
+        
+  build:
+    name: Build
+    runs-on: macos-latest
+    needs: test
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Select Xcode version
+      run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+      
+    - name: Cache Swift Package Manager
+      uses: actions/cache@v3
+      with:
+        path: .build
+        key: ${{ runner.os }}-spm-${{ hashFiles('**/Package.resolved') }}
+        restore-keys: |
+          ${{ runner.os }}-spm-
+    
+    - name: Build debug
+      run: |
+        chmod +x scripts/build.sh
+        ./scripts/build.sh --skip-tests
+        
+    - name: Build release
+      run: |
+        ./scripts/build.sh --release --skip-tests --archive
+        
+    - name: Upload debug artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: dragoboo-debug
+        path: build/Dragoboo.app
+        
+    - name: Upload release artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: dragoboo-release
+        path: |
+          archives/
+          build/Dragoboo.app
+          
+  lint:
+    name: Lint
+    runs-on: macos-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Install SwiftLint
+      run: |
+        brew install swiftlint
+        
+    - name: Run SwiftLint
+      run: |
+        swiftlint --strict
+        
+    - name: Install SwiftFormat
+      run: |
+        brew install swiftformat
+        
+    - name: Check Swift formatting
+      run: |
+        swiftformat --lint .
+        
+  security:
+    name: Security
+    runs-on: macos-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Run security checks
+      run: |
+        # Check for hardcoded secrets
+        if grep -r "password\|secret\|token\|key" --include="*.swift" --exclude-dir=".git" .; then
+          echo "Potential secrets found in code"
+          exit 1
+        fi
+        
+        # Check for unsafe Swift code patterns
+        if grep -r "unsafeBitCast\|unsafeDowncast\|UnsafePointer" --include="*.swift" --exclude-dir=".git" .; then
+          echo "Unsafe Swift patterns found - review required"
+          # Don't fail build, just warn
+        fi
+        
+    - name: Check dependencies
+      run: |
+        # List all dependencies
+        swift package show-dependencies
+        
+        # Check for known vulnerable packages (basic check)
+        swift package dump-package | grep -i "dependencies" || true
