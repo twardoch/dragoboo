@@ -55,3 +55,10 @@ fastlane/test_output
 
 # Code Injection
 iOSInjectionProject/
+.cursor/
+.specstory/
+coverage.xml
+.coverage
+htmlcov/
+*.pyc
+__pycache__/
